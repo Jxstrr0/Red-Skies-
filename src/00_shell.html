@@ -8,7 +8,9 @@
 <title>Red Skies - V%RS_VERSION%</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Big+Shoulders+Display:wght@500;700&display=swap" rel="stylesheet">
+<!-- non-blocking: a slow or blocked font host must never hold up the game (the title falls back to Impact / Arial Narrow until it loads) -->
+<link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Big+Shoulders+Display:wght@500;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Big+Shoulders+Display:wght@500;700&display=swap" rel="stylesheet"></noscript>
 <style>
 :root {
   --bg: #050707; --panel: #0b100e; --panel-hi: #111a15; --line: #1f2e25; --line-hi: #2f4a39;
@@ -449,7 +451,7 @@ body.titling #meta .sub { color: #e6b8a4; text-shadow: 0 1px 3px #000; }
 <div id="sheet" data-act="sheetx"><div class="card" id="sheetcard"></div></div>
 <div id="endcard" class="overlay"><div class="card" id="endbody"></div></div>
 <div id="rotate" class="overlay"><div class="icon"></div><div>ROTATE TO PORTRAIT</div></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- RS_THREE -->
 <!-- RS_SCRIPTS -->
 
 

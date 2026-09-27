@@ -16,8 +16,8 @@ const FRIEND = [RS.KIND.JET_FRIEND, RS.KIND.STRIKE_FRIEND, RS.KIND.TRANSPORT, RS
 
 // weapons — exact numbers shared with the sim
 const W = {
-  lance: { minKm: 3, maxKm: 40, maxAlt: 20000, spd: 1100, pkBase: 0.8, reloadS: 50, perLauncher: 4, kind: 'sam', label: 'Lance' },
-  dart: { minKm: 1, maxKm: 20, maxAlt: 10000, spd: 1000, pkBase: 0.8, reloadS: 15, perLauncher: 4, kind: 'sam', label: 'Dart' },
+  lance: { minKm: 3, maxKm: 60, maxAlt: 20000, spd: 1840, pkBase: 0.8, reloadS: 50, perLauncher: 4, kind: 'sam', label: 'Lance' },   // V1.4 envelope
+  dart: { minKm: 1, maxKm: 25, maxAlt: 10000, spd: 1250, pkBase: 0.8, reloadS: 15, perLauncher: 4, kind: 'sam', label: 'Dart' },
   harrow: { kind: 'gun', minKm: 0, maxKm: 4, maxAlt: 4000, roundsPerBurst: 40, pkPerBurst: 0.6, reloadS: 30, perLauncher: 600, label: 'Harrow' } };
 for (const w in W) for (const k in W[w]) ok(C.weapons[w] && C.weapons[w][k] === W[w][k], `weapons.${w}.${k} = ${W[w][k]}`);
 ok(JSON.stringify(C.reserve) === JSON.stringify({ lance: 8, dart: 8, harrow: 1200 }), 'reserve');

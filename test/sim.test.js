@@ -121,7 +121,10 @@ S().shift.roe = 'TIGHT';
 ok(!sim.cmd.fire(h1.id) && last('FIRE_REJECTED').p.reason === 'roe_tight_not_hostile', 'TIGHT rejects UNKNOWN');
 const q = sim.query.engage(h1.id, 'L1');
 ok(q.ok === false && q.reason === 'roe_tight_not_hostile' && q.pk > 0.3 && q.tti > 0 && q.inRange, `query.engage shape (pk ${q.pk}, tti ${q.tti})`);
-ok(sim.query.bestLauncher(h1.id) === 'L1' || sim.query.bestLauncher(h1.id) === 'L2', 'bestLauncher picks a Lance at ~20 km');
+// V1.4: Dart reaches 25 km, and bestLauncher saves Lances: a costlier weapon must beat the cheaper one's Pk by PK_MARGIN (0.12)
+const qL = sim.query.engage(h1.id, 'L1'), qD = sim.query.engage(h1.id, 'L3'), bl = sim.query.bestLauncher(h1.id);
+ok(bl === (qD.inRange && qD.pk >= qL.pk - 0.12 ? 'L3' : 'L1') || (bl === 'L2' && !(qD.inRange && qD.pk >= qL.pk - 0.12)),
+  `bestLauncher prefers the cheaper Dart at ~${Math.round(h1.rangeKm)} km when its Pk is within the margin (${bl}; Pk L ${qL.pk} D ${qD.pk})`);
 ok(sim.cmd.interrogate(h1.id) && h1.iff === 'PENDING' && E('IFF_SENT').length === 1, 'interrogate → PENDING + IFF_SENT');
 sim.step();
 ok(!sim.cmd.interrogate(h1.id), 'no re-interrogate while pending');
@@ -159,8 +162,9 @@ sim.cmd.setDoctrine('SALVO');
 sim.cmd.assign(h2.id, 'L1');
 const nL = E('LAUNCH').length;
 ok(sim.cmd.fire(h2.id), 'FREE allows UNKNOWN');
-until(() => E('LAUNCH').length >= nL + 2, 1);
-ok(E('LAUNCH').length === nL + 2 && Math.abs(E('LAUNCH')[nL + 1].t - E('LAUNCH')[nL].t - 0.4) < 0.06, 'SALVO fires 2, staggered 0.4 s');
+until(() => E('LAUNCH').length >= nL + 2, 3);
+// V1.4: Lance salvo rounds leave ~2.0 s apart (the cold-launch pair of the reference clip; Dart 1.5 s)
+ok(E('LAUNCH').length === nL + 2 && Math.abs(E('LAUNCH')[nL + 1].t - E('LAUNCH')[nL].t - 2.0) < 0.06, 'SALVO fires 2, staggered 2.0 s (Lance)');
 ok(S().battery.launchers[0].rounds === 2 && !sim.cmd.reload('L1'), 'reserve exhaustion blocks reload');
 ok(!sim.cmd.fire('T999') && last('FIRE_REJECTED').p.reason === 'no_track', 'fire unknown → no_track');
 until(() => S().missiles.length === 0, 60);

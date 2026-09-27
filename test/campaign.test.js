@@ -13,7 +13,7 @@ const fin = v => typeof v === 'number' && Number.isFinite(v);
 const KINDS = Object.values(RS.KIND), ROES = Object.values(RS.ROE), REV = Object.values(RS.RANDOM_EVENT);
 const FRIEND = [RS.KIND.JET_FRIEND, RS.KIND.STRIKE_FRIEND, RS.KIND.TRANSPORT, RS.KIND.HELO_FRIEND];
 const SPAWN_KEYS = ['t', 'kind', 'x', 'y', 'alt', 'hdg', 'spd', 'corridor', 'orbit', 'callsign', 'iffBroken', 'jammer', 'armCarrier', 'strike', 'group', 'popup', 'count', 'spread'];
-const DEF_KEYS = ['id', 'name', 'duration', 'roe', 'reserve', 'roeChanges', 'events', 'spawns', 'comms'];
+const DEF_KEYS = ['id', 'name', 'duration', 'roe', 'weather', 'reserve', 'roeChanges', 'events', 'spawns', 'comms'];   // weather: V1.1 {time, sky}
 
 ok(CP && Array.isArray(CP.shifts) && CP.shifts.length === 6, '6 campaign shifts');
 ok(CP.story.length === 6 && CP.budget.length === 6 && ['lance', 'dart', 'harrow'].every(w => fin(CP.prices[w]) && CP.prices[w] > 0), 'story/budget/prices');

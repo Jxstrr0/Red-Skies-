@@ -1,0 +1,13 @@
+Copyright (c) 2026 Prairie Blue Studio. All rights reserved.
+
+Red Skies, including its source code, art, audio design, text and game
+data, is proprietary. The code is published for viewing only. No permission
+is granted to copy, modify, merge, publish, distribute, sublicense or sell
+any part of it, or to use it in other works, without prior written
+permission from Prairie Blue Studio.
+
+Third-party software
+--------------------
+vendor/three.min.js is three.js r128, Copyright (c) 2010-2021 three.js
+authors, used under the MIT License (see vendor/three.LICENSE). The MIT
+License applies to that file only.
