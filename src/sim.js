@@ -14,6 +14,7 @@
   const TRACK_LOST_S = 20;       // unseen → faded
   const WARN_AFTER = 90, WARN_EVERY = 10;
   const DEFENDED_KM = 3;         // hostile inside this = leaker
+  const POPUP_LEAD_KM = 2;       // V1.4.3: pop-up helos start this far outside atKm (≈ 30 s before they pop)
   const EXIT_KM = 115, EGRESS_KM = 40, PUSH_KM = 95;   // PUSH_KM: raids start out near the edge of the 100 km radar   // egressing hostiles leave the picture at EGRESS_KM
   // [RS] realistic flight: the round is thrown ~20 m up (cold launch), the motor lights at `ign`, it climbs near-vertically and
   // pitches over while boosting at `acc` m/s² for `burn` s (peak = acc·burn), then coasts, losing speed to drag (dv/dt = -k·v²).
@@ -176,7 +177,13 @@
         const end = e.corridor[e.corridor.length - 1], d = q => Math.hypot(q[0] - end[0], q[1] - end[1]), here = d([e.x, e.y]);
         while (e.wp < e.corridor.length - 1 && d(e.corridor[e.wp]) > here) e.wp++;
       }
-      if (e.popup) { e.alt = Math.min(e.alt, e.popup.hideAlt * 0.8); e.baseAlt = Math.max(e.baseAlt, e.popup.hideAlt * 2.5); }   // V1.4.3: hide low, pop up to 2.5×hideAlt
+      if (e.popup) {                               // V1.4.3: hide low, pop up to 2.5×hideAlt
+        e.alt = Math.min(e.alt, e.popup.hideAlt * 0.8); e.baseAlt = Math.max(e.baseAlt, e.popup.hideAlt * 2.5);
+        // masked until atKm anyway, so start just outside it at the authored time (spawns authored at 24–28 km took ~4 min
+        // to get there, and many only popped up after the shift had ended)
+        const r0 = Math.hypot(e.x, e.y), rr = e.popup.atKm + POPUP_LEAD_KM;
+        if (r0 > rr) { e.x *= rr / r0; e.y *= rr / r0; }
+      }
       if (!HOSTILE[s.kind] && !e.corridor && (s.orbit || s.kind === K.JET_FRIEND)) {
         const o = s.orbit || { cx: s.x, cy: s.y, r: 8 };
         e.orbit = { cx: o.cx, cy: o.cy, r: o.r || 8, dir: 1 };
@@ -802,6 +809,9 @@
     }
     const G1 = launcher('G1');
     if (s.gun.firing && s.t >= gunUntil) { s.gun.firing = false; s.gun.targetId = null; if (G1.reloadT <= 0) G1.ready = true; }
+    // V1.4.3: an empty launcher reloads as soon as free reserve exists (a reload refused because another launcher had the last
+    // rounds promised is retried after that reload lands, or when a late resupply / survival resupply refills the reserve)
+    for (const L of s.battery.launchers) if (L.rounds <= 0 && !(L.reloadT > 0) && !L.jammed) startReload(L);
     for (const L of s.battery.launchers) {
       if (L.reloadT <= 0) continue;
       L.reloadT = Math.max(0, L.reloadT - dt);

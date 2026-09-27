@@ -1347,7 +1347,7 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
       C(222, 'HQ', 'This one is not turning. Strike jet north, heading for the depot. Stop it before 6 km.', 'high'),
       C(270, 'BATTERY', 'Drone pair east-north-east.', 'normal'),
       C(292, 'HQ', 'Low-level launch east. Cruise missile, very low.', 'high'),
-      C(340, 'TOWER', 'Angel 5 on the pad. Clean watch, Kessel.', 'low')
+      C(340, 'TOWER', 'Angel 5 still inbound on the east corridor, low and slow. Clean watch, Kessel.', 'low')   // V1.4.3: it lands after the shift
     ]
   });
   const s1c = V(s1, 'C', 'Morning Traffic', {
@@ -1849,6 +1849,7 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   const TRACK_LOST_S = 20;       // unseen → faded
   const WARN_AFTER = 90, WARN_EVERY = 10;
   const DEFENDED_KM = 3;         // hostile inside this = leaker
+  const POPUP_LEAD_KM = 2;       // V1.4.3: pop-up helos start this far outside atKm (≈ 30 s before they pop)
   const EXIT_KM = 115, EGRESS_KM = 40, PUSH_KM = 95;   // PUSH_KM: raids start out near the edge of the 100 km radar   // egressing hostiles leave the picture at EGRESS_KM
   // [RS] realistic flight: the round is thrown ~20 m up (cold launch), the motor lights at `ign`, it climbs near-vertically and
   // pitches over while boosting at `acc` m/s² for `burn` s (peak = acc·burn), then coasts, losing speed to drag (dv/dt = -k·v²).
@@ -2011,7 +2012,13 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
         const end = e.corridor[e.corridor.length - 1], d = q => Math.hypot(q[0] - end[0], q[1] - end[1]), here = d([e.x, e.y]);
         while (e.wp < e.corridor.length - 1 && d(e.corridor[e.wp]) > here) e.wp++;
       }
-      if (e.popup) { e.alt = Math.min(e.alt, e.popup.hideAlt * 0.8); e.baseAlt = Math.max(e.baseAlt, e.popup.hideAlt * 2.5); }   // V1.4.3: hide low, pop up to 2.5×hideAlt
+      if (e.popup) {                               // V1.4.3: hide low, pop up to 2.5×hideAlt
+        e.alt = Math.min(e.alt, e.popup.hideAlt * 0.8); e.baseAlt = Math.max(e.baseAlt, e.popup.hideAlt * 2.5);
+        // masked until atKm anyway, so start just outside it at the authored time (spawns authored at 24–28 km took ~4 min
+        // to get there, and many only popped up after the shift had ended)
+        const r0 = Math.hypot(e.x, e.y), rr = e.popup.atKm + POPUP_LEAD_KM;
+        if (r0 > rr) { e.x *= rr / r0; e.y *= rr / r0; }
+      }
       if (!HOSTILE[s.kind] && !e.corridor && (s.orbit || s.kind === K.JET_FRIEND)) {
         const o = s.orbit || { cx: s.x, cy: s.y, r: 8 };
         e.orbit = { cx: o.cx, cy: o.cy, r: o.r || 8, dir: 1 };
@@ -2637,6 +2644,9 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
     }
     const G1 = launcher('G1');
     if (s.gun.firing && s.t >= gunUntil) { s.gun.firing = false; s.gun.targetId = null; if (G1.reloadT <= 0) G1.ready = true; }
+    // V1.4.3: an empty launcher reloads as soon as free reserve exists (a reload refused because another launcher had the last
+    // rounds promised is retried after that reload lands, or when a late resupply / survival resupply refills the reserve)
+    for (const L of s.battery.launchers) if (L.rounds <= 0 && !(L.reloadT > 0) && !L.jammed) startReload(L);
     for (const L of s.battery.launchers) {
       if (L.reloadT <= 0) continue;
       L.reloadT = Math.max(0, L.reloadT - dt);
@@ -11552,6 +11562,9 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     c.lineWidth = 1;
   }
   const byTti = (a, b) => a.tti - b.tti;
+  // V1.4.3: reserve rounds not already promised to another launcher's running reload (same rule as sim startReload)
+  const freeReserve = (b, l) => (b.reserve ? b.reserve[l.weapon] : 1) -
+    b.launchers.reduce((n, o) => n + (o !== l && o.weapon === l.weapon && o.reloadT > 0 ? o.max - o.rounds : 0), 0);
   const msl = [];                                     // reused: missiles sorted by TTI
 
   function drawScope() {
@@ -12129,7 +12142,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
         st = `<span class="bar"><i style="width:${Math.max(0, Math.min(100, pct))}%"></i></span><small class="amber">RLD ${Math.ceil(l.reloadT)}s</small>`;
       }
       const asg = l.assignedTrack || Object.keys(b.assignedTo || {}).find(k => b.assignedTo[k] === l.id) || null;
-      const rsv = rs ? rs[l.weapon] : 1, can = !l.jammed && l.ready && l.rounds < l.max && rsv > 0;
+      const rsv = freeReserve(b, l), can = !l.jammed && l.ready && l.rounds < l.max && rsv > 0;
       h += `<div class="lrow"><b>${l.id}</b><div><small>${W_UP(l.weapon)}</small>${pips}</div><div>${st}</div>` +
         `<span class="${asg ? 'amber' : 'muted'}">${asg ? '→' + asg : '—'}</span>` +
         `<button class="btn sm${can ? '' : ' dis'}" data-act="reload" data-l="${l.id}">RELOAD</button></div>`;
@@ -12333,8 +12346,9 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
       closeSheet();
     } else if (act === 'reload') {
       const l = s.battery.launchers.find(x => x.id === el.dataset.l); if (!l) return;
-      const rs = s.battery.reserve;
-      const b = l.jammed ? 'Launcher jammed' : !l.ready ? 'Already reloading' : l.rounds >= l.max ? l.id + ' is full' : rs && rs[l.weapon] <= 0 ? 'Reserve empty: no ' + W_UP(l.weapon) : null;
+      const rs = s.battery.reserve, busy = s.battery.launchers.find(o => o !== l && o.weapon === l.weapon && o.reloadT > 0);
+      const b = l.jammed ? 'Launcher jammed' : !l.ready ? 'Already reloading' : l.rounds >= l.max ? l.id + ' is full' : rs && rs[l.weapon] <= 0 ? 'Reserve empty: no ' + W_UP(l.weapon)
+        : freeReserve(s.battery, l) <= 0 ? `Reserve already committed to ${busy ? busy.id : 'another'} reload` : null;
       if (b) { toast(b, 'amber'); return; }
       tap('button'); if (!sim.cmd.reload(l.id)) toast('Reload refused', 'amber');
     } else if (act === 'ack') { tap('button'); sim.cmd.ack(+el.dataset.id); cache.bc = null; }
@@ -12890,7 +12904,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
       return `<button class="mrow${next ? ' next' : ''}" data-m="pick" data-i="${i}" ${locked ? 'disabled' : ''}><span><b>SHIFT ${i + 1}</b>${esc(nm)} <span class="muted">· ${mmss(s.duration)}</span>${mds}</span>${badge}</button>`;
     }).join('');
     show('map', `<div class="kick">CAMPAIGN</div><h2>BATTERY KESSEL</h2><p class="muted">Six watches on the Varenna border. Grade D or better unlocks the next shift.</p>` +
-      rows + `<div class="box"><div class="sec">MAGAZINE (NEXT SHIFT)</div>${resTxt(camp.reserve)}</div>` + btn('menu', '◂ MENU', 'dim'));
+      rows + `<div class="box"><div class="sec">MAGAZINE (NEXT SHIFT)</div>${resCap(camp.reserve, capOf(camp.next))}</div>` + btn('menu', '◂ MENU', 'dim'));
   }
 
   /* V1.2: each shift has variants A/B/C; one is rolled per playthrough, a retry after a failure keeps it */
@@ -12910,11 +12924,27 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     if (v) d.brief = clone(v.story);
     if (i === camp.next) {
       d.reserve = clone(camp.reserve);
-      // V1.4.3: a variant that authors a thinner magazine (C5B: 6 Lance) caps what goes into the shift; the rest waits in the depot
-      const vr = v && v.def.reserve, base = CP().shifts[i].reserve || content().reserve;
-      if (vr) for (const w of W3) if (vr[w] < base[w] && d.reserve[w] > vr[w]) { (d.held = d.held || {})[w] = d.reserve[w] - vr[w]; d.reserve[w] = vr[w]; }
+      const cap = capOf(i);
+      if (cap) for (const w in cap) if (d.reserve[w] > cap[w]) { (d.held = d.held || {})[w] = d.reserve[w] - cap[w]; d.reserve[w] = cap[w]; }
     } else d.reserve = d.reserve || clone(content().reserve);
     return d;
+  }
+  /** V1.4.3: a variant that authors a thinner magazine than its base shift (C5B: 6 Lance) caps what goes into the shift;
+      the rest waits in the depot. Returns {weapon: cap} or null. Rolls the variant (persisted), like campDef. */
+  function capOf(i) {
+    if (!(i >= 0 && i < CP().shifts.length)) return null;
+    const v = variantOf(i), vr = v && v.def.reserve, base = CP().shifts[i].reserve || content().reserve;
+    if (!vr) return null;
+    let cap = null;
+    for (const w of W3) if (vr[w] < base[w]) (cap = cap || {})[w] = vr[w];
+    return cap;
+  }
+  /** Magazine text with the variant cap applied: in-shift figures plus a depot note. */
+  function resCap(r, cap, held) {
+    const x = clone(r), h = clone(held || {});
+    if (cap) for (const w in cap) if (x[w] > cap[w]) { h[w] = (h[w] || 0) + x[w] - cap[w]; x[w] = cap[w]; }
+    const hw = W3.filter(w => h[w] > 0);
+    return resTxt(x) + (hw.length ? `<div class="muted" style="font-size:11px">This shift's magazine is capped: ${hw.map(w => h[w] + ' ' + WL[w]).join(', ')} wait${hw.length > 1 || h[hw[0]] !== 1 ? '' : 's'} in the depot for later shifts.</div>` : '');
   }
   function pick(i) {
     if (i > camp.next) return;
@@ -12986,7 +13016,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
       (friends.length ? `<div class="box"><div class="sec">FRIENDLY TRAFFIC</div>${fr}</div>` : '') +
       `<div class="box" id="m-wx"><div class="sec">CONDITIONS</div><p><b class="cyan">${esc(wxLine(def.weather))}</b></p>${evs ? `<ul>${evs}</ul>` : ''}</div>` +
       `<div class="box"><div class="sec">RULES OF ENGAGEMENT</div>Weapons ${roe}</div>` +
-      `<div class="box"><div class="sec">RESERVE · ${def.endless ? 'ENDLESS WATCH' : 'WATCH ' + mmss(def.duration)}</div>${resTxt(r)}<div class="muted" style="font-size:11px">Launchers start loaded (Lance 2×4, Dart 4, Harrow 600).</div></div>` +
+      `<div class="box"><div class="sec">RESERVE · ${def.endless ? 'ENDLESS WATCH' : 'WATCH ' + mmss(def.duration)}</div>${resCap(r, null, def.held)}<div class="muted" style="font-size:11px">Launchers start loaded (Lance 2×4, Dart 4, Harrow 600).</div></div>` +
       (notes ? `<div class="box"><div class="sec">HQ NOTES</div><ul>${notes}</ul></div>` : '') +
       btn('begin', sv ? 'BEGIN RUN ▸' : 'BEGIN SHIFT ▸', 'pri', 'id="m-begin"') + btn(mode.type === 'campaign' ? 'map' : sv ? 'surv' : 'free', '◂ BACK', 'dim'));
   }
@@ -13278,7 +13308,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
       `<p class="muted">Budget ${pend.credits} cr${esc(bonus)}. Unused reserve carries over; unspent credits are banked.</p>` +
       `<div class="box">${rows}</div>` +
       `<div class="box tot"><span>SPEND <b class="${left < 0 ? 'red' : 'amber'}" id="m-spent">${spent}</b> cr</span><span>LEFT <b class="ok" id="m-left">${left}</b> cr</span></div>` +
-      `<div class="box"><div class="sec">RESERVE FOR SHIFT ${pend.idx + 1}</div>${resTxt({ lance: camp.reserve.lance + buy.lance, dart: camp.reserve.dart + buy.dart, harrow: camp.reserve.harrow + buy.harrow })}</div>` +
+      `<div class="box"><div class="sec">RESERVE FOR SHIFT ${pend.idx + 1}</div>${resCap({ lance: camp.reserve.lance + buy.lance, dart: camp.reserve.dart + buy.dart, harrow: camp.reserve.harrow + buy.harrow }, capOf(pend.idx))}</div>` +
       btn('confirm', 'CONFIRM ▸ BRIEFING', 'pri', 'id="m-confirm"') + btn('map', '◂ CAMPAIGN MAP', 'dim'));
   }
   function stepBuy(w, dir) {
