@@ -188,6 +188,7 @@
     if (!sctx || !sim) return;
     const now = performance.now();
     tickFire(now);
+    if (RS.covered && RS.covered()) return;             // V1.4.3 perf: nothing to draw under an opaque menu
     if (scope.clientWidth !== W || scope.clientHeight !== H) sizeScope();
     const s = S(), rad = s.radar, on = rad.on, c = sctx, rk = viewKm;
     c.setTransform(dpr, 0, 0, dpr, 0, 0);

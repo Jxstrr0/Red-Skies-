@@ -61,10 +61,10 @@
     L3: { rel: 19, dist: 70, face: VIEW_BRG + 19 + 118, kind: 'launcher_dart', lod: 'high' },
     G1: { rel: -1, dist: 34, face: VIEW_BRG - 1, kind: 'gun_harrow' },
     RADAR: { rel: -8, dist: 88, face: VIEW_BRG - 8 + 105, kind: 'radar_search' },           // search AESA (ARMs home on this one)
-    FC: { rel: 11, dist: 120, face: VIEW_BRG + 11 - 70, kind: 'radar_fc' },                  // fire-control PESA on its mast
+    FC: { rel: 11, dist: 120, face: VIEW_BRG + 11 - 70, kind: 'radar_fc', lod: 'low' },   // V1.4.3 perf: ≥ 98 m away (fine detail is sub-pixel)                  // fire-control PESA on its mast
     LA: { rel: -13, dist: 210, face: VIEW_BRG - 13 + 40, kind: 'radar_lowalt', lod: 'low' },  // low-altitude radar tower
-    CP: { rel: 15, dist: 98, face: VIEW_BRG + 15 + 95, kind: 'command_post' },
-    GEN: { rel: 25, dist: 110, face: VIEW_BRG + 25 + 150, kind: 'generator' }
+    CP: { rel: 15, dist: 98, face: VIEW_BRG + 15 + 95, kind: 'command_post', lod: 'low' },
+    GEN: { rel: 25, dist: 110, face: VIEW_BRG + 25 + 150, kind: 'generator', lod: 'low' }
   };
   for (const id in LAYOUT) {
     const L = LAYOUT[id], [dx, dz] = dirOf(VIEW_BRG + L.rel);
@@ -268,8 +268,9 @@
         this.A[i] = d.a0[i] * (1 - f) * (1 - f * 0.3);
       }
       if (this.rr >= this.n) this.rr = 0;
-      const g = this.geo; g.setDrawRange(0, this.n);
-      for (const k of PS_ATTR) g.attributes[k].needsUpdate = true;
+      const g = this.geo, n = this.n; g.setDrawRange(0, n);
+      if (!n) return;                             // V1.4.3 perf: nothing alive → nothing drawn, nothing to upload
+      for (const k of PS_ATTR) { const a = g.attributes[k]; a.updateRange.offset = 0; a.updateRange.count = n * a.itemSize; a.needsUpdate = true; }   // live prefix only
     }
   }
   // particle presets
@@ -481,9 +482,13 @@
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new V3(), pp = new V3(), col = new THREE.Color(), Y = new V3(0, 1, 0);
     const straw = new THREE.Color(0xd9c38f), pale = new THREE.Color(0xe6dcc0), olive = new THREE.Color(0x8e8c5c), sage = new THREE.Color(0x8d9272),
       dryg = new THREE.Color(0xc2ab7c), grey = new THREE.Color(0xaaa594), rust = new THREE.Color(0xb68f5f);
-    const layer = (N, geo, near, seed, o) => {
+    // V1.4.3 perf: farGeo/farD split a layer — tufts beyond farD metres use a lighter geometry (same placement stream, so the
+    // field looks the same; beyond ~10 m a tuft is a few pixels tall and the extra quads/segments were ~100k triangles a frame)
+    const layer = (N, geo, near, seed, o, farGeo, farD) => {
       o = o || { ox: 0, oz: 0, brg: VIEW_BRG, spread: near ? 80 : 92, d0: near ? 3.2 : 30, d1: near ? 30 : 300, pw: near ? 1.35 : 1.7 };
-      const r = rng(seed), mesh = new THREE.InstancedMesh(geo, grassMat(tex), N), aVar = new Float32Array(N);
+      const r = rng(seed), mat = grassMat(tex);
+      const band = g => ({ mesh: new THREE.InstancedMesh(g, mat, N), aVar: new Float32Array(N), n: 0 });
+      const A = band(geo), B = farGeo ? band(farGeo) : null;
       let n = 0;
       for (let i = 0; i < N * 5 && n < N; i++) {
         const b = o.brg + (r() - 0.5) * o.spread, d = o.d0 + Math.pow(r(), o.pw) * o.d1;
@@ -501,26 +506,33 @@
         const w = wv * (0.65 + r() * 0.5 + (d > 60 ? 0.35 : 0)) * (1 + close * 0.25);
         q.setFromAxisAngle(Y, r() * 6.283);
         m.compose(pp.set(x, heightAt(x, z) - 0.04, z), q, sc.set(w, h, w));
-        mesh.setMatrixAt(n, m); aVar[n] = v;
+        const T = B && d > farD ? B : A, mesh = T.mesh, k = T.n++;
+        mesh.setMatrixAt(k, m); T.aVar[k] = v;
         col.copy(olive).lerp(sage, sstep(0.3, 0.7, patch) * 0.6).lerp(straw, 0.05 + 0.75 * sstep(0.3, 0.7, dry)).lerp(dryg, fine * 0.35);
         if (v === 1) col.lerp(pale, 0.35);
         if (v === 2) col.lerp(rust, 0.18 * r());
         if (v === 3) col.lerp(grey, 0.65);
         col.multiplyScalar(0.46 + clump * 0.26 + r() * 0.16);
-        mesh.setColorAt(n, col);
+        mesh.setColorAt(k, col);
         n++;
       }
-      geo.setAttribute('aVar', new THREE.InstancedBufferAttribute(aVar, 1));
-      mesh.count = n; mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-      mesh.frustumCulled = false; scene.add(mesh);
-      grassLayers.push({ mesh, full: n });
-      return mesh;
+      if (B) { B.full = tuftGeo(3, 3); B.full.setAttribute('aVar', new THREE.InstancedBufferAttribute(B.aVar, 1)); A.mesh.userData.farBand = { mesh: B.mesh, lite: farGeo, full: B.full }; }
+      for (const T of B ? [A, B] : [A]) {
+        const mesh = T.mesh;
+        mesh.geometry.setAttribute('aVar', new THREE.InstancedBufferAttribute(T.aVar, 1));
+        mesh.count = T.n; mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        mesh.frustumCulled = false;
+        if (T === A) scene.add(mesh); else A.mesh.add(mesh);         // far band rides on the near mesh: one visible flag for both
+        grassLayers.push({ mesh, full: T.n });
+      }
+      return A.mesh;
     };
-    grassMesh = layer(11000, tuftGeo(3, 3), true, 4242);
+    grassMesh = layer(11000, tuftGeo(3, 3), true, 4242, null, tuftGeo(2, 2), 10);
     layer(15000, tuftGeo(2, 1), false, 777);
     // cover page: the camera sits low in the grass SW of the site looking NNE into the sun → backlit foreground tufts
-    grassTitle = layer(6500, tuftGeo(3, 3), true, 99, { ox: TCAM.x, oz: TCAM.z, brg: TCAM.brg, spread: 110, d0: 1.4, d1: 60, pw: 1.6 });
+    grassTitle = layer(6500, tuftGeo(3, 3), true, 99, { ox: TCAM.x, oz: TCAM.z, brg: TCAM.brg, spread: 110, d0: 1.4, d1: 60, pw: 1.6 });   // kept full: lighter tufts dim the backlit rim of the hero shot
     grassTitle.visible = !!title.on;
+    if (title.on) grassMesh.userData.farBand.mesh.geometry = grassMesh.userData.farBand.full;
     grassFull = grassLayers.reduce((a, L) => a + L.full, 0);
   }
   function buildSky() {
@@ -679,11 +691,16 @@
         for (let j = 0; j < 8; j++) smoke.spawn(P0.x + _rnd(-1, 1), P0.y + _rnd(0, 3), P0.z + _rnd(-1, 1), _rnd(-2, 2), _rnd(6, 16), _rnd(-2, 2), FX.ejectGas, _rnd(0.5, 0.9));
         api.shake(0.12);
       }
-      if (th.ign < 0) { for (let j = 0; j < 2; j++) smoke.spawn(_v.x + _rnd(-0.6, 0.6), _v.y - _rnd(0, 1.5), _v.z + _rnd(-0.6, 0.6), _rnd(-1.5, 1.5), _rnd(-3, 1), _rnd(-1.5, 1.5), FX.throwTrail, _rnd(0.8, 1.2)); continue; }
+      // V1.4.3 perf: at most one emission per 1/60 s (a 120 Hz phone drew twice the smoke); slower frames never emit more than before
+      th.acc = (th.acc || 0) + dt * 60;
+      const ticks = th.acc >= 1 ? 1 : 0; if (ticks) th.acc = Math.min(th.acc - 1, 0.99);
+      if (th.ign < 0) { for (let j = 0; j < 2 * ticks; j++) smoke.spawn(_v.x + _rnd(-0.6, 0.6), _v.y - _rnd(0, 1.5), _v.z + _rnd(-0.6, 0.6), _rnd(-1.5, 1.5), _rnd(-3, 1), _rnd(-1.5, 1.5), FX.throwTrail, _rnd(0.8, 1.2)); continue; }
       th.ign += dt;
       if (th.ign < 1.4) {                     // first ~1.4 s of burn: blinding plume pushed down onto the site
-        glow.spawn(_v.x, _v.y, _v.z, 0, -6, 0, FX.ignFire, 0.8 * th.k);
-        for (let j = 0; j < 2; j++) smoke.spawn(_v.x + _rnd(-2, 2), _v.y - _rnd(0, 4), _v.z + _rnd(-2, 2), _rnd(-6, 6), _rnd(-26, -10) * th.k, _rnd(-6, 6), FX.exhaust, _rnd(0.8, 1.3) * th.k);
+        for (let u = 0; u < ticks; u++) {
+          glow.spawn(_v.x, _v.y, _v.z, 0, -6, 0, FX.ignFire, 0.8 * th.k);
+          for (let j = 0; j < 2; j++) smoke.spawn(_v.x + _rnd(-2, 2), _v.y - _rnd(0, 4), _v.z + _rnd(-2, 2), _rnd(-6, 6), _rnd(-26, -10) * th.k, _rnd(-6, 6), FX.exhaust, _rnd(0.8, 1.3) * th.k);
+        }
       }
     }
   }
@@ -743,6 +760,12 @@
     }
   }
   function makeModel(spec, lod) {
+    if (lod === 'far') {                    // V1.4.3 perf: 2.5–4.5 km (2–5 px) — the ~150-tri primitive stand-in, not the 10–12k-tri low model
+      const key = spec.kind + '|far';
+      const t = tpl[key] || (tpl[key] = models.placeholder ? models.placeholder(spec.kind, {}) : models.create(spec.kind, { placeholder: true }));   // vendor wrappers ignore opts.placeholder
+      const o = cloneBare(t); o.userData = { nozzles: null, length: 10, rotor: null };
+      return o;
+    }
     const opts = Object.assign({}, spec.opts, { lod });
     const key = spec.kind + JSON.stringify(opts);
     if (spec.kind === 'jet_hostile') { try { return models.create('jet_hostile', opts); } catch (e) { return models.create('jet_hostile', { placeholder: true }); } }
@@ -770,23 +793,24 @@
   }
 
   /* ---------------- aircraft actors ---------------- */
-  const actors = {};                         // entity id → { root, hi, lo, spec, useLo, prev:{hdg,alt,t}, bank, trailT }
+  const actors = {};                         // entity id → { root, hi, lo, far, spec, useLo (false|true|'far'), prev:{hdg,alt,t}, bank, trailT }
   function actorFor(v) {
     let a = actors[v.id];
     if (a) return a;
     const spec = specFor(v), root = new THREE.Group();
     root.rotation.order = 'YXZ';
-    a = actors[v.id] = { root, spec, hi: null, lo: null, useLo: null, bank: 0, pitch: 0, hdgPrev: v.hdg, altPrev: v.alt, trailT: 0, vy: 0, P: new V3(), t0: simT };
+    a = actors[v.id] = { root, spec, hi: null, lo: null, far: null, useLo: null, bank: 0, pitch: 0, hdgPrev: v.hdg, altPrev: v.alt, trailT: 0, vy: 0, P: new V3(), t0: simT };
     scene.add(root);
     return a;
   }
-  function setLod(a, lo) {
+  function setLod(a, lo) {                   // lo: false = high, true = low, 'far' = primitive stand-in (jets only)
     if (a.useLo === lo) return;
     a.useLo = lo;
-    const key = lo ? 'lo' : 'hi';
-    if (!a[key]) { a[key] = makeModel(a.spec, lo ? 'low' : 'high'); a.root.add(a[key]); }
-    if (a.hi) a.hi.visible = !lo; if (a.lo) a.lo.visible = lo;
+    const key = lo === 'far' ? 'far' : lo ? 'lo' : 'hi';
+    if (!a[key]) { a[key] = makeModel(a.spec, key === 'far' ? 'far' : lo ? 'low' : 'high'); a.root.add(a[key]); }
+    if (a.hi) a.hi.visible = key === 'hi'; if (a.lo) a.lo.visible = key === 'lo'; if (a.far) a.far.visible = key === 'far';
   }
+  const FAR_TIER = { jet_hostile: 1, jet_friend: 1 };   // the heavy vendor models (10–12k tris, up to 41 draws even at 'low')
   function removeActor(id) { const a = actors[id]; if (!a) return; scene.remove(a.root); delete actors[id]; }
 
   /* ---------------- missile flights (TEL launch → hand-off → follow sim missile) ---------------- */
@@ -1287,6 +1311,8 @@
   function setTitle(on) {
     on = !!on; if (on === title.on || !scene) return title.on;
     title.on = on; if (grassTitle) grassTitle.visible = on;
+    const fb = grassMesh && grassMesh.userData.farBand;          // V1.4.3: full tufts for the cover shot, light ones in play
+    if (fb) fb.mesh.geometry = on ? fb.full : fb.lite;
     if (chase.mode) chaseReset();
     if (on) titleReset();
     else {
@@ -1822,12 +1848,14 @@
     const R = renderer, I = R.info.render, E = eo, S = E.stats, W = E.W, H = E.H, cabOn = !!(cab && shelter.visible);
     R.info.reset();
     S.eo.calls = S.eo.tris = S.post.calls = S.post.tris = S.cab.calls = S.cab.tris = 0;
+    // V1.4.3 perf: the EO camera's world pass runs at ≤ ~30 Hz (a TV/IR tracker's rate); in between, the monitor shows the last picture
+    const tNow = performance.now(), eoDue = !(E.lastPass > tNow - 31);
     if (!cabOn) { R.setScissorTest(false); R.setViewport(0, 0, W, H); R.render(scene, camera); stat(S.main, 0, 0); return; }
     let c0 = 0, t0 = 0;
     const u = E.post.mat.uniforms; u.uOn.value = E.on ? 1 : 0;
     if (E.on && E.swapped) {
       const r = E.rectS;
-      eoPass(r.w, r.h); stat(S.eo, c0, t0); c0 = I.calls; t0 = I.triangles;
+      if (eoDue) { eoPass(r.w, r.h); E.lastPass = tNow; } stat(S.eo, c0, t0); c0 = I.calls; t0 = I.triangles;
       R.setScissorTest(false); R.setViewport(0, 0, W, H);
       R.render(cabScene, camera); stat(S.cab, c0, t0); c0 = I.calls; t0 = I.triangles;
       R.setViewport(r.x, H - r.y - r.h, r.w, r.h); R.setScissor(r.x, H - r.y - r.h, r.w, r.h); R.setScissorTest(true);
@@ -1842,7 +1870,7 @@
         if (Wn.w > 0) { R.setScissor(Wn.x, H - Wn.y - Wn.h, Wn.w, Wn.h); R.setScissorTest(true); R.autoClear = false; R.render(scene, camera); R.autoClear = true; R.setScissorTest(false); }
       }
       stat(S.main, c0, t0); c0 = I.calls; t0 = I.triangles;
-      if (E.on) { eoPass(E.rectN.w, E.rectN.h); stat(S.eo, c0, t0); c0 = I.calls; t0 = I.triangles; }
+      if (E.on && eoDue) { eoPass(E.rectN.w, E.rectN.h); E.lastPass = tNow; stat(S.eo, c0, t0); c0 = I.calls; t0 = I.triangles; }
       R.setRenderTarget(null); R.setScissorTest(false); R.setViewport(0, 0, W, H);
       R.autoClear = false; R.clearDepth(); R.render(cabScene, camera); R.autoClear = true; stat(S.cab, c0, t0);
     }
@@ -1993,12 +2021,12 @@
         const dist = a.root.position.distanceTo(cam), far = dist > FAR_AIR, seenFar = dist < vm;   // beyond visual range: not drawn at all
         const inEO = eoSees(x, y, z);         // V1.3: in the tracker's view — full model + true-size effects for the EO pass
         a.root.visible = !far;
-        if (!far) setLod(a, a.useLo ? dist > 1400 : dist > 1600);
+        if (!far) setLod(a, FAR_TIER[a.spec.kind] && dist > (a.useLo === 'far' ? 2300 : 2500) ? 'far' : a.useLo ? dist > 1400 : dist > 1600);
         if (inEO && eoActN < 16) eoAct[eoActN++] = a;
         a.bank += (clamp((a.turn || 0) * 0.06, -1.1, 1.1) - a.bank) * Math.min(1, dt * 3);
         a.pitch += (Math.atan2(a.vy || 0, Math.max(40, spd)) - a.pitch) * Math.min(1, dt * 3);
         a.root.rotation.set(-a.pitch, yawFor(v.hdg), a.bank);
-        const mdl = a.useLo ? a.lo : a.hi, rotor = mdl && mdl.userData.rotor; if (rotor && !far) rotor.rotation.y += dt * 30;
+        const mdl = a.useLo === 'far' ? a.far : a.useLo ? a.lo : a.hi, rotor = mdl && mdl.userData.rotor; if (rotor && !far) rotor.rotation.y += dt * 30;
         if (inEO && a.hi && a.hi !== mdl && a.hi.userData.rotor) a.hi.userData.rotor.rotation.y += dt * 30;
         // legibility dot (min 1.5 px) + night nav lights
         const P = a.root.position, navOk = night && v.kind !== 'cruise_missile' && v.kind !== 'arm_missile';

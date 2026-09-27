@@ -384,18 +384,22 @@
         send.gain.setTargetAtTime(0.25 * Math.min(1, 0.3 + e.d / 3000) * distGain(e.d, refF), now, 0.1);
       }
     }
+    // V1.4.3: once silent, unplug the voice from master/reverb so the whole subgraph (incl. its 26 s delay line) can be freed
+    let torn = false;
+    const teardown = ms => { if (torn) return; torn = true; setTimeout(() => { [out, send, pn].forEach(n => { try { n && n.disconnect(); } catch (e) { } }); }, ms); };
     const h = {
       kind: ALIAS[kind] || kind,
       kill() {                                   // [RS] immediate silence + removal (shift restart)
         h.stop(0.02); handles.delete(h);
         const now = ctx.currentTime; out.gain.cancelScheduledValues(now); out.gain.setTargetAtTime(0, now, 0.03);
         srcs.forEach(x => { try { x.stop(now + 0.2); } catch (e) { } });
+        teardown(400);
       },
       update() {
         const now = ctx.currentTime;
         if (!ended) source(now);
         listener(now);
-        if (ended && now > endAt) { handles.delete(h); out.gain.setTargetAtTime(0, now, 0.05); }
+        if (ended && now > endAt) { handles.delete(h); out.gain.setTargetAtTime(0, now, 0.05); teardown(500); }
       },
       stop(fade) {
         if (ended) return; ended = true; h.ended = true;
