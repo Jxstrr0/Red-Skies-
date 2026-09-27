@@ -1,35 +1,19 @@
-/* RED SKIES — audio (RS.audio + RS.sfx weapon audio) + haptics browser check (Playwright + preinstalled Chromium).
+/* RED SKIES — audio (RS.audio + RS.sfx weapon audio) + haptics browser check (Playwright, shared setup in test/_browser.js).
    node build.js && node test/audio.check.js   → exits 1 on failure */
-const fs = require('fs'), path = require('path');
-let pw;
-try { pw = require('playwright'); } catch (e) {
-  try { pw = require('playwright-core'); } catch (e2) { pw = require('/home/claude/.npm-global/lib/node_modules/playwright'); }
-}
-const { chromium } = pw;
-const URL = 'file://' + path.join(__dirname, '..', 'dist', 'weapons_hold.html');
-function findChromium() {
-  const base = process.env.PLAYWRIGHT_BROWSERS_PATH || '/opt/pw-browsers';
-  for (const p of [path.join(base, 'chromium-1194/chrome-linux/chrome'), '/opt/pw-browsers/chromium/chrome-linux/chrome']) if (fs.existsSync(p)) return p;
-  return undefined;
-}
+const { launch, newPage, URL } = require('./_browser');
 let fails = 0;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fails++; };
 const KINDS = ['arm', 'fratricide', 'asset', 'leaker', 'radar', 'lowammo'];
+const frames = (page, n) => page.evaluate(n => new Promise(r => { let k = 0; const f = () => (++k >= n ? r() : requestAnimationFrame(f)); requestAnimationFrame(f); }), n);
 
 (async () => {
-  const launch = { headless: true, args: ['--use-gl=swiftshader', '--enable-webgl', '--ignore-gpu-blocklist', '--autoplay-policy=no-user-gesture-required'] };
-  if (process.env.HTTPS_PROXY) launch.proxy = { server: process.env.HTTPS_PROXY };
-  let browser;
-  try { browser = await chromium.launch(launch); } catch (e) { launch.executablePath = findChromium(); browser = await chromium.launch(launch); }
-  const bctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, ignoreHTTPSErrors: true });
-  await bctx.addInitScript(() => {
+  const browser = await launch(['--autoplay-policy=no-user-gesture-required']);
+  const { page, errors } = await newPage(browser, { deviceScaleFactor: 1 });   // audio only: 1× keeps the software-GL frames cheap
+  page.setDefaultTimeout(120000);
+  await page.addInitScript(() => {
     window.__vib = [];
     try { Object.defineProperty(navigator, 'vibrate', { configurable: true, value: p => { window.__vib.push(JSON.stringify(p)); return true; } }); } catch (e) { /* */ }
   });
-  const page = await bctx.newPage();
-  const errors = [];
-  page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
-  page.on('pageerror', e => errors.push('pageerror: ' + e.message));
 
   await page.goto(URL, { waitUntil: 'load' });
   await page.tap('#start');
@@ -70,7 +54,11 @@ const KINDS = ['arm', 'fratricide', 'asset', 'leaker', 'radar', 'lowammo'];
     E('UI_FIRE_ARMED', { armed: true }); E('UI_FIRE_ARMED', { armed: false });
     E('FIRE_REJECTED', { id: 'T90', reason: 'roe_hold' });
     E('COMMS', { id: 1, from: 'HQ', text: 'test', priority: 'high', needsAck: true });
-    E('ARM_INBOUND', { id: 'T92', eta: 20 });
+    // contracts.js V1.4.3: ARM_INBOUND fires at launch (id null, tracked false) and again once the ARM is a track (tracked true);
+    // audio.js buzzes the warning only for the first
+    const n0 = window.__vib.length;
+    E('ARM_INBOUND', { id: null, eta: 20, tracked: false }); E('ARM_INBOUND', { id: 'T92', eta: 14, tracked: true });
+    window.__armBuzz = window.__vib.slice(n0).filter(p => p === '[100,50,100,50,100]').length;
     E('FRATRICIDE', { targetId: 'T93' });
     E('RADAR_WARN', { seconds: 95 });
     E('RELOAD_DONE', { launcherId: 'L1' });
@@ -102,10 +90,18 @@ const KINDS = ['arm', 'fratricide', 'asset', 'leaker', 'radar', 'lowammo'];
   await page.waitForTimeout(300);
   const fl = await page.evaluate(() => ({ active: RS.sfx.active, kinds: window.__fl.map(h => h.kind) }));
   ok(fl.active >= 1 && fl.kinds.some(k => /missile_(lance|dart)/.test(k)), 'SAM flight loop running ' + JSON.stringify(fl));
+  // A Lance shot flies ~45 s. Software WebGL runs this page at 2-5 fps and main.js advances at most 0.25 s of sim per frame,
+  // so waiting on the page clock takes minutes here: add 0.5 s of sim per rendered frame (the sfx loop still follows the round
+  // on every frame, as it would on a slow phone) until the engagement resolves (≤ 120 s of sim).
+  const w0 = Date.now(), s0 = await page.evaluate(() => RS.sim.state.t);
   let evs = [];
-  for (let i = 0; i < 60 && !evs.length; i++) { await page.waitForTimeout(500); evs = await page.evaluate(() => window.__ev || []); }
-  ok(evs.includes('INTERCEPT') || evs.includes('MISS'), 'engagement resolved: ' + evs.join(','));
-  await page.waitForTimeout(1000);
+  for (let i = 0; i < 240 && !evs.length; i++) {
+    evs = await page.evaluate(() => { for (let k = 0; k < 10 && !(window.__ev || []).length; k++) RS.sim.step(); return window.__ev || []; });
+    await frames(page, 1);
+  }
+  const s1 = await page.evaluate(() => RS.sim.state.t);
+  ok(evs.includes('INTERCEPT') || evs.includes('MISS'), `engagement resolved: ${evs.join(',')} (${(s1 - s0).toFixed(1)} s of sim in ${((Date.now() - w0) / 1000).toFixed(0)} s)`);
+  await page.waitForTimeout(1000); await frames(page, 3);
   const ended = await page.evaluate(() => window.__fl.filter(h => /missile_/.test(h.kind)).every(h => h.ended));
   ok(ended, 'SAM flight loops ended after intercept');
   let act = -1;
@@ -113,6 +109,9 @@ const KINDS = ['arm', 'fratricide', 'asset', 'leaker', 'radar', 'lowammo'];
   ok(act <= 0, `sfx voices drained after engagement (${act})`);
   const p2 = await page.evaluate(() => RS.audio.debug(true));
   ok(!p2.nan && p2.flyby <= 3, `no NaN through the engagement, flyby voices ≤ 3 (${p2.flyby})`);
+  // after a MISS the launcher still owns the surviving track and re-locks it (sim.js updateLocks): release the assignment
+  // so the lock/alarm checks below count only their own LOCK events
+  if (eng) await page.evaluate(id => RS.sim.cmd.assign(id, null), eng.id);
 
   // locks: one voice per launcher, stop cleanly
   const lk = await page.evaluate(() => {
@@ -147,6 +146,8 @@ const KINDS = ['arm', 'fratricide', 'asset', 'leaker', 'radar', 'lowammo'];
   const vib = await page.evaluate(() => window.__vib.slice());
   for (const p of [[30], [20, 40, 20], [100, 50, 100, 50, 100], [60], [400], [15, 30, 15]])
     ok(vib.includes(JSON.stringify(p)), 'vibrate ' + JSON.stringify(p));
+  const armBuzz = await page.evaluate(() => window.__armBuzz);
+  ok(armBuzz === 1, `ARM_INBOUND buzzes once: at launch, not again when tracked (${armBuzz})`);
 
   // mute silences everything (sfx included) and haptics
   await page.evaluate(() => RS.audio.setMuted(true));
