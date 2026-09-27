@@ -16,9 +16,10 @@ const html = shell.replace(/%RS_VERSION%/g, VERSION)
   .replace(MARKER, () => `<script>\nwindow.RS = window.RS || {}; window.RS.VERSION = '${VERSION}';\n` + js + '\n</script>');
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, html);
+fs.writeFileSync(path.join(__dirname, 'index.html'), html);   // repo-root copy: open it directly or serve it with GitHub Pages
 // Artifact flavour: the claude.ai Artifact host wraps content in its own doctype/html/head/body skeleton,
 // so strip ours (keep <title>, <meta>, <style> and the body content in document order).
 const art = html.replace(/^\s*<!DOCTYPE[^>]*>\s*/i, '').replace(/<\/?html[^>]*>/gi, '')
   .replace(/<\/?head>/gi, '').replace(/<\/?body[^>]*>/gi, '').replace(/^\s*<meta (charset|name="viewport")[^>]*>\s*$/gim, '');
 fs.writeFileSync(OUT.replace(/\.html$/, '.artifact.html'), art.trim() + '\n');
-console.log(`build: ${path.relative(__dirname, OUT)}  ${(Buffer.byteLength(html) / 1024).toFixed(1)} KB (${html.split('\n').length} lines) + artifact flavour`);
+console.log(`build: ${path.relative(__dirname, OUT)}  ${(Buffer.byteLength(html) / 1024).toFixed(1)} KB (${html.split('\n').length} lines) + artifact flavour + index.html`);
