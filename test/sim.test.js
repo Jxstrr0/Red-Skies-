@@ -284,7 +284,7 @@ const SHAPE = {
   LAUNCH: ['missileId', 'weapon', 'launcherId', 'targetId', 'x', 'y', 'alt'], GUN_FIRE: ['launcherId', 'targetId', 'burst', 'bearingDeg', 'elevDeg', 'rounds'],
   INTERCEPT: ['missileId', 'targetId', 'x', 'y', 'alt'], MISS: ['missileId', 'targetId'], KILL: ['targetId', 'weapon', 'wasFriend', 'x', 'y', 'alt', 'trackId'],
   FRATRICIDE: ['targetId'], RELOAD_START: ['launcherId', 'seconds'], RELOAD_DONE: ['launcherId'], RADAR_STATE: ['on'], RADAR_WARN: ['seconds'],
-  JAMMING: ['level', 'bearing'], ARM_INBOUND: ['id', 'eta'], ARM_IMPACT: ['damage'], ASSET_HIT: ['byId', 'damage'], LEAKER: ['id'],
+  JAMMING: ['level', 'bearing'], ARM_INBOUND: ['id', 'eta', 'tracked'], ARM_IMPACT: ['damage'], ASSET_HIT: ['byId', 'damage'], LEAKER: ['id'],
   ROE_CHANGE: ['roe'], COMMS: ['from', 'text', 'priority', 'id', 'needsAck'], ALARM: ['kind', 'on'], RANDOM_EVENT: ['kind', 'active', 'detail'],
   SHIFT_START: ['def'], SHIFT_END: ['grade', 'failed', 'reason', 'stats'], FIRE_REJECTED: ['id', 'reason'], LOCK: ['id', 'launcherId', 'on']
 };

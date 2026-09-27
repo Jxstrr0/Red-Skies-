@@ -50,7 +50,9 @@ RS.RANDOM_EVENT = { RADAR_FAULT:'radar_fault', LAUNCHER_JAM:'launcher_jam', COMM
    RADAR_STATE     {on:boolean}
    RADAR_WARN      {seconds}                                 continuous emission is getting dangerous (ARM risk rising)
    JAMMING         {level:0..1, bearing}                     0 = clear
-   ARM_INBOUND     {id, eta}                                 anti-radiation missile launched at us
+   ARM_INBOUND     {id, eta, tracked}                        anti-radiation missile launched at us: once at launch
+                                                             (id null, tracked false), again when the ARM becomes a track
+                                                             (id = that track id, tracked true)
    ARM_IMPACT      {damage:0..1}                             radar hit (radar may go down)
    ASSET_HIT       {byId, damage:0..1}                       defended asset struck
    LEAKER          {id}                                      hostile passed the defended line
