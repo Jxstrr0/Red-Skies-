@@ -181,6 +181,9 @@
     c.lineWidth = 1;
   }
   const byTti = (a, b) => a.tti - b.tti;
+  // V1.4.3: reserve rounds not already promised to another launcher's running reload (same rule as sim startReload)
+  const freeReserve = (b, l) => (b.reserve ? b.reserve[l.weapon] : 1) -
+    b.launchers.reduce((n, o) => n + (o !== l && o.weapon === l.weapon && o.reloadT > 0 ? o.max - o.rounds : 0), 0);
   const msl = [];                                     // reused: missiles sorted by TTI
 
   function drawScope() {
@@ -188,6 +191,7 @@
     if (!sctx || !sim) return;
     const now = performance.now();
     tickFire(now);
+    if (RS.covered && RS.covered()) return;             // V1.4.3 perf: nothing to draw under an opaque menu
     if (scope.clientWidth !== W || scope.clientHeight !== H) sizeScope();
     const s = S(), rad = s.radar, on = rad.on, c = sctx, rk = viewKm;
     c.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -757,7 +761,7 @@
         st = `<span class="bar"><i style="width:${Math.max(0, Math.min(100, pct))}%"></i></span><small class="amber">RLD ${Math.ceil(l.reloadT)}s</small>`;
       }
       const asg = l.assignedTrack || Object.keys(b.assignedTo || {}).find(k => b.assignedTo[k] === l.id) || null;
-      const rsv = rs ? rs[l.weapon] : 1, can = !l.jammed && l.ready && l.rounds < l.max && rsv > 0;
+      const rsv = freeReserve(b, l), can = !l.jammed && l.ready && l.rounds < l.max && rsv > 0;
       h += `<div class="lrow"><b>${l.id}</b><div><small>${W_UP(l.weapon)}</small>${pips}</div><div>${st}</div>` +
         `<span class="${asg ? 'amber' : 'muted'}">${asg ? '→' + asg : '—'}</span>` +
         `<button class="btn sm${can ? '' : ' dis'}" data-act="reload" data-l="${l.id}">RELOAD</button></div>`;
@@ -961,8 +965,9 @@
       closeSheet();
     } else if (act === 'reload') {
       const l = s.battery.launchers.find(x => x.id === el.dataset.l); if (!l) return;
-      const rs = s.battery.reserve;
-      const b = l.jammed ? 'Launcher jammed' : !l.ready ? 'Already reloading' : l.rounds >= l.max ? l.id + ' is full' : rs && rs[l.weapon] <= 0 ? 'Reserve empty: no ' + W_UP(l.weapon) : null;
+      const rs = s.battery.reserve, busy = s.battery.launchers.find(o => o !== l && o.weapon === l.weapon && o.reloadT > 0);
+      const b = l.jammed ? 'Launcher jammed' : !l.ready ? 'Already reloading' : l.rounds >= l.max ? l.id + ' is full' : rs && rs[l.weapon] <= 0 ? 'Reserve empty: no ' + W_UP(l.weapon)
+        : freeReserve(s.battery, l) <= 0 ? `Reserve already committed to ${busy ? busy.id : 'another'} reload` : null;
       if (b) { toast(b, 'amber'); return; }
       tap('button'); if (!sim.cmd.reload(l.id)) toast('Reload refused', 'amber');
     } else if (act === 'ack') { tap('button'); sim.cmd.ack(+el.dataset.id); cache.bc = null; }

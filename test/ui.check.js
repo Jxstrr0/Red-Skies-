@@ -1,32 +1,20 @@
-/* RED SKIES — UI check against the REAL sim (Playwright + preinstalled Chromium; never `playwright install`).
+/* RED SKIES — UI check against the REAL sim (Playwright; shared setup in test/_browser.js; never `playwright install`).
    node test/ui.check.js → builds dist via build.js, runs at 390×844 and 360×740 (dpr 2, touch), exits 1 on failure.
    Uses RS.sim.debugTruth(trackId) (test-only) to pick a true hostile; fast-forwards with RS.sim.step().
+   UI_SIZE=390x844 (or 360x740) runs one phone size only (each takes ~2 min under software GL); default: both.
    Screenshots: test/shots/uiC_<w>_*.png */
 const fs = require('fs'), path = require('path'), { execSync } = require('child_process');
-let pw;
-try { pw = require('playwright'); } catch (e) {
-  try { pw = require('playwright-core'); } catch (e2) { pw = require('/home/claude/.npm-global/lib/node_modules/playwright'); }
-}
-const { chromium } = pw;
-const ROOT = path.join(__dirname, '..'), SHOTS = path.join(__dirname, 'shots');
-const URL = 'file://' + path.join(ROOT, 'dist', 'weapons_hold.html');
+const { launch, newPage, ROOT, URL, SHOTS } = require('./_browser');
 fs.mkdirSync(SHOTS, { recursive: true });
 execSync('node build.js', { cwd: ROOT, stdio: 'inherit' });
 
-function findChromium() {
-  const base = process.env.PLAYWRIGHT_BROWSERS_PATH || '/opt/pw-browsers';
-  for (const p of [path.join(base, 'chromium-1194/chrome-linux/chrome'), '/opt/pw-browsers/chromium/chrome-linux/chrome']) if (fs.existsSync(p)) return p;
-  return undefined;
-}
 let fails = 0;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fails++; };
 
 async function run(browser, W, H) {
   console.log(`\n== ${W}x${H} ==`);
-  const ctx = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, ignoreHTTPSErrors: true });
-  const page = await ctx.newPage(), errors = [];
-  page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
-  page.on('pageerror', e => errors.push('pageerror: ' + e.message));
+  const { ctx, page, errors } = await newPage(browser, { viewport: { width: W, height: H } });
+  page.setDefaultTimeout(120e3);                             // software GL at ~3 fps (and other browsers sharing the CPUs): input can lag
   const shot = n => page.screenshot({ path: path.join(SHOTS, `uiC_${W}_${n}.png`) });
   const ev = (fn, arg) => page.evaluate(fn, arg);
 
@@ -37,10 +25,18 @@ async function run(browser, W, H) {
   await page.waitForTimeout(500);
   ok(await ev(() => RS.sim.state.shift.running), 'shift running');
 
-  // strip renders 4 chips
-  const chips = await ev(() => [...document.querySelectorAll('#lstrip .lchip')].map(b => ({ id: b.dataset.l, t: b.textContent, h: b.getBoundingClientRect().height })));
-  ok(chips.length === 4 && chips.map(c => c.id).join() === 'L1,L2,L3,G1', `strip has 4 chips (${chips.map(c => c.t).join(' | ')})`);
+  // V1.4 strip: 4 launcher chips + a 5th fixed 44 px column, the one-tap SHOT/SALVO doctrine toggle #b-doc
+  // (src/00_shell.html: #lstrip grid-template-columns: repeat(4, minmax(0, 1fr)) 44px; src/ui.js renderStrip)
+  const strip = await ev(() => [...document.querySelectorAll('#lstrip > *')].map(b => ({ id: b.dataset.l || b.id, t: b.textContent, w: b.getBoundingClientRect().width, h: b.getBoundingClientRect().height })));
+  const chips = strip.filter(c => /^[LG]\d$/.test(c.id)), doc = strip[4] || {};
+  ok(strip.length === 5 && chips.map(c => c.id).join() === 'L1,L2,L3,G1', `strip has 4 launcher chips + doctrine key (${strip.map(c => c.t).join(' | ')})`);
   ok(chips.every(c => /READY|RLD|JAM|EMPTY/.test(c.t)), 'chips show launcher status with no selection');
+  ok(doc.id === 'b-doc' && Math.abs(doc.w - 44) < 1 && /1×\s*SHOT/.test(doc.t), `5th column: 44 px SHOT/SALVO key (${doc.id} ${(doc.w || 0).toFixed(1)}px "${doc.t}")`);
+  await page.tap('#b-doc'); await page.waitForTimeout(200);
+  const salvo = await ev(() => ({ d: RS.sim.state.battery.doctrine, t: document.getElementById('b-doc').textContent, on: document.getElementById('b-doc').classList.contains('on') }));
+  ok(salvo.d === 'SALVO' && /2×\s*SALVO/.test(salvo.t) && salvo.on, `doctrine key tap → SALVO (${salvo.d}, "${salvo.t}")`);
+  await page.tap('#b-doc'); await page.waitForTimeout(200);
+  ok(await ev(() => RS.sim.state.battery.doctrine === RS.DOCTRINE.SLS && /1×\s*SHOT/.test(document.getElementById('b-doc').textContent)), 'second tap → back to SHOOT-LOOK-SHOOT');
 
   // fast-forward until a true hostile (not an ARM) is inside Lance/Dart reach; select it
   let tid = null;
@@ -66,7 +62,7 @@ async function run(browser, W, H) {
   if (!tid) { await shot('fail'); await ctx.close(); return; }
   await page.waitForTimeout(300);
   await shot('01_selected');
-  const pre = await ev(id => ({ cls: [...document.querySelectorAll('.lchip')].map(b => b.className + ' :: ' + b.textContent),
+  const pre = await ev(id => ({ cls: [...document.querySelectorAll('#lstrip .lchip[data-l]')].map(b => b.className + ' :: ' + b.textContent),
     q: RS.sim.state.battery.launchers.map(l => { const q = RS.sim.query.engage(id, l.id); return l.id + ':' + q.ok + '/' + q.reason; }) }), tid);
   console.log('  INFO pre-classify chips', JSON.stringify(pre));
   ok(pre.cls.every(c => / (ok|no|asg) /.test(c + ' ')), 'every chip is green/grey/assigned with a track selected');
@@ -77,7 +73,7 @@ async function run(browser, W, H) {
   const aa = await ev(id => {
     const t = RS.sim.state.tracks.find(x => x.id === id);
     return { cls: t && t.cls, assigned: t && t.assigned, toast: document.getElementById('toast').textContent,
-      chips: [...document.querySelectorAll('.lchip')].map(b => b.dataset.l + ':' + b.className.replace('lchip', '').trim() + ':' + b.querySelector('.lc-s').textContent) };
+      chips: [...document.querySelectorAll('#lstrip .lchip[data-l]')].map(b => b.dataset.l + ':' + b.className.replace('lchip', '').trim() + ':' + b.querySelector('.lc-s').textContent) };
   }, tid);
   console.log('  INFO after HOSTILE', JSON.stringify(aa));
   ok(aa.cls === 'HOSTILE', 'HOSTILE thumb classifies');
@@ -120,7 +116,7 @@ async function run(browser, W, H) {
   ok(launched.n >= 1, `hold fires (LAUNCH/GUN_FIRE x${launched.n})`);
   await page.waitForTimeout(600); await shot('05_launched');
 
-  // ARM warning shows exactly once (alert strip, with countdown)
+  // ARM warning shows exactly once: in the alert strip (the old #armban banner is retired: src/00_shell.html #armban display:none)
   await ev(() => { RS.sim.state.radar.armEta = 42; RS.bus.emit('ALARM', { kind: 'arm', on: true }); });
   await page.waitForTimeout(150);
   const arm = await ev(() => [...document.querySelectorAll('body *')].filter(e => e.children.length === 0 || e.id === 'alertstrip')
@@ -153,7 +149,8 @@ async function run(browser, W, H) {
   });
   console.log('  INFO layout', JSON.stringify(L));
   ok(L.sw <= L.cw, `no horizontal scroll (${L.sw} <= ${L.cw})`);
-  ok(Math.abs(L.hatch / H - 0.35) < 0.02, `hatch ~35% (${L.hatch.toFixed(0)}px)`);
+  // V1.4 cabin: #hatch { flex: 0 0 55% } (src/00_shell.html, "the hatch is the Pantsir cabin (3-D, ~55 % of the phone)")
+  ok(Math.abs(L.hatch / H - 0.55) < 0.02, `hatch ~55% (${L.hatch.toFixed(0)}px)`);
   ok(L.minTap >= 44, `tap targets >= 44px (min ${L.minTap.toFixed(1)})`);
   ok(Math.abs(L.stripBottom - L.tzTop) < 2 && L.tzBottom <= H + 0.5, 'strip sits directly above the thumb zone, both on screen');
   ok(L.clipped.length === 0, 'no clipped chip/thumb/tab labels' + (L.clipped.length ? ': ' + L.clipped.join(' | ') : ''));
@@ -173,12 +170,10 @@ async function run(browser, W, H) {
 }
 
 (async () => {
-  const launch = { headless: true, args: ['--use-gl=swiftshader', '--enable-webgl', '--ignore-gpu-blocklist'] };
-  if (process.env.HTTPS_PROXY) launch.proxy = { server: process.env.HTTPS_PROXY };
-  let browser;
-  try { browser = await chromium.launch(launch); } catch (e) { launch.executablePath = findChromium(); browser = await chromium.launch(launch); }
-  await run(browser, 390, 844);
-  await run(browser, 360, 740);
+  const browser = await launch();
+  const sizes = [[390, 844], [360, 740]].filter(([w, h]) => !process.env.UI_SIZE || process.env.UI_SIZE === w + 'x' + h);
+  if (!sizes.length) { console.error('UI_SIZE must be 390x844 or 360x740'); process.exit(1); }
+  for (const [w, h] of sizes) await run(browser, w, h);
   await browser.close();
   console.log(fails ? `\n${fails} FAILED` : '\nALL PASS');
   process.exit(fails ? 1 : 0);

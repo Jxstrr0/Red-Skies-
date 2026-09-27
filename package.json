@@ -1,15 +1,15 @@
 {
   "name": "red-skies",
-  "version": "1.4.2",
   "private": true,
+  "license": "UNLICENSED",
   "description": "Red Skies: a phone-first air-defence game. You are the fire-control officer of SAM battery Kessel.",
   "scripts": {
     "build": "node build.js",
-    "test": "node test/sim.test.js && node test/content.test.js && node test/campaign.test.js",
-    "check:browser": "node build.js && node test/browser.check.js && node test/scene.check.js && node test/ui.check.js && node test/meta.check.js && node test/audio.check.js",
+    "test": "node test/run.js",
+    "check:browser": "node build.js && node test/run.js --browser",
     "balance": "node tools/balance.js"
   },
   "devDependencies": {
-    "playwright": "^1.56.1"
+    "playwright": "1.56.1"
   }
 }

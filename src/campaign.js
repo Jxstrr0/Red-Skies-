@@ -308,7 +308,7 @@
       C(222, 'HQ', 'This one is not turning. Strike jet north, heading for the depot. Stop it before 6 km.', 'high'),
       C(270, 'BATTERY', 'Drone pair east-north-east.', 'normal'),
       C(292, 'HQ', 'Low-level launch east. Cruise missile, very low.', 'high'),
-      C(340, 'TOWER', 'Angel 5 on the pad. Clean watch, Kessel.', 'low')
+      C(340, 'TOWER', 'Angel 5 still inbound on the east corridor, low and slow. Clean watch, Kessel.', 'low')   // V1.4.3: it lands after the shift
     ]
   });
   const s1c = V(s1, 'C', 'Morning Traffic', {

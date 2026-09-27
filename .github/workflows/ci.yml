@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      browser:
+        description: Also run the Playwright browser checks (slow, software WebGL)
+        type: boolean
+        default: false
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build
+        run: node build.js
+      - name: index.html matches src/
+        run: |
+          if ! git diff --quiet -- index.html; then
+            echo "::error file=index.html::index.html is out of date with src/. Run 'node build.js' and commit index.html."
+            git diff --stat -- index.html
+            exit 1
+          fi
+      - name: Node tests
+        run: node test/run.js
+
+  browser-checks:
+    if: github.event_name == 'workflow_dispatch' && inputs.browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Browser checks
+        run: node test/run.js --browser
+      - name: Screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-check-shots
+          path: test/shots/
+          if-no-files-found: ignore

@@ -99,7 +99,7 @@
     RS.bus.on('MISS', p => { if (watched(p)) doFlash('miss', 'MISS'); });
     RS.bus.on('SHIFT_START', () => { flashUntil = 0; flash.className = ''; });
     built = true;
-    const loop = () => { try { update(); } catch (e) { console.error('[eo]', e); } requestAnimationFrame(loop); };
+    const loop = () => { try { if (!(RS.covered && RS.covered())) update(); } catch (e) { console.error('[eo]', e); } requestAnimationFrame(loop); };   // V1.4.3: idle under menus
     requestAnimationFrame(loop);
     return true;
   }

@@ -1,34 +1,15 @@
-/* RED SKIES — 3-D scene check (Playwright + preinstalled Chromium, software WebGL).
-   node test/scene.check.js   → exits 1 on failure, writes test/shots/scene_*.png */
+/* RED SKIES — 3-D scene check (Playwright, shared setup in test/_browser.js, software WebGL).
+   node build.js && node test/scene.check.js   → exits 1 on failure, writes test/shots/scene_*.png */
 const fs = require('fs'), path = require('path');
-let pw;
-try { pw = require('playwright'); } catch (e) {
-  try { pw = require('playwright-core'); } catch (e2) { pw = require('/home/claude/.npm-global/lib/node_modules/playwright'); }
-}
-const { chromium } = pw;
-const ROOT = path.join(__dirname, '..');
-const URL = 'file://' + path.join(ROOT, 'dist', 'weapons_hold.html');
-const SHOTS = path.join(__dirname, 'shots');
+const { launch, newPage, URL, SHOTS } = require('./_browser');
 fs.mkdirSync(SHOTS, { recursive: true });
-function findChromium() {
-  const base = process.env.PLAYWRIGHT_BROWSERS_PATH || '/opt/pw-browsers';
-  for (const p of [path.join(base, 'chromium-1194/chrome-linux/chrome'), '/opt/pw-browsers/chromium/chrome-linux/chrome']) if (fs.existsSync(p)) return p;
-  return undefined;
-}
 let fails = 0;
 const ok = (c, m) => { console.log((c ? '  PASS ' : '  FAIL ') + m); if (!c) fails++; };
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 (async () => {
-  const launch = { headless: true, args: ['--use-gl=swiftshader', '--enable-webgl', '--ignore-gpu-blocklist'] };
-  if (process.env.HTTPS_PROXY) launch.proxy = { server: process.env.HTTPS_PROXY };
-  let browser;
-  try { browser = await chromium.launch(launch); } catch (e) { launch.executablePath = findChromium(); browser = await chromium.launch(launch); }
-  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, ignoreHTTPSErrors: true });
-  const page = await ctx.newPage();
-  const errors = [];
-  page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
-  page.on('pageerror', e => errors.push('pageerror: ' + e.message));
+  const browser = await launch();
+  const { page, errors } = await newPage(browser);
+  page.setDefaultTimeout(120000);
 
   await page.goto(URL, { waitUntil: 'load' });
   await page.tap('#start');

@@ -69,8 +69,9 @@ console.log('pop-up helos');
   RS.sim.startShift(def([{ t: 0, kind: 'helo_hostile', x: 26, y: 0, alt: 40, hdg: 270, spd: 65, popup: { hideAlt: 60, atKm: 10 } }]));
   RS.sim.cmd.radar(true);
   g.until(() => S().tracks.length, 500);
-  const tr = S().tracks[0];
+  const tr = S().tracks[0], tt = S().t;
   ok(!!tr && tr.rangeKm <= 10.5, `first tracked inside atKm (${tr && tr.rangeKm.toFixed(1)} km)`);
+  ok(!!tr && tt <= 60, `pops up soon after its spawn time, not minutes later (${tt.toFixed(0)} s)`);
   let maxAlt = 0;
   for (let i = 0; i < 20 * 20; i++) { RS.sim.step(); const t = S().tracks[0]; if (t) maxAlt = Math.max(maxAlt, t.alt); }
   ok(maxAlt > 100, `climbs after popping up (max ${Math.round(maxAlt)} m)`);
@@ -103,6 +104,11 @@ console.log('shared reserve');
   g.steps(52);
   ok(L('L1').rounds === 4 && L('L2').rounds === 0 && S().battery.reserve.lance === 0, `after reload: L1 ${L('L1').rounds}, L2 ${L('L2').rounds}, reserve ${S().battery.reserve.lance}`);
   ok(E('RELOAD_DONE').every(e => e.p.launcherId !== 'L2'), 'no RELOAD_DONE for the launcher that got nothing');
+  S().battery.reserve.lance += 8;                                   // late resupply
+  g.steps(1);
+  ok(L('L2').reloadT > 0, 'the empty launcher starts reloading once reserve is free again');
+  g.steps(52);
+  ok(L('L2').rounds === 4 && S().battery.reserve.lance === 4, `L2 reloaded from the resupply (L2 ${L('L2').rounds}, reserve ${S().battery.reserve.lance})`);
 }
 
 /* ---------- 6. SHIFT_END.grade matches the debrief grade (RS.campaign.grade) ---------- */

@@ -1,6 +1,6 @@
 # Red Skies
 
-**V1.4.2.0** · a phone-first air-defence game by Prairie Blue Studio.
+A phone-first air-defence game by Prairie Blue Studio. The current version is in [`VERSION`](VERSION); changes are logged in [`plan/status.md`](plan/status.md).
 
 You are the fire-control officer of SAM battery *Kessel*, Republic of Varenna.
 Watch the radar, sort friend from foe, and hold your fire until you are sure.
@@ -9,9 +9,10 @@ if you shoot one down (fratricide) the shift fails.
 
 ## Play
 
-Open `index.html` in a browser; it is the whole game in one self-contained page.
-It is laid out for a phone held in portrait. The page loads three.js r128 from
-cdnjs and two fonts from Google Fonts, so it needs a network connection.
+Open `index.html` in a browser; it is the whole game in one self-contained page,
+three.js included, so it also plays offline. It is laid out for a phone held in
+portrait. Two title fonts load from Google Fonts when a connection is available;
+without one, the title uses fallback fonts.
 
 To play from GitHub, enable **Settings → Pages** for this repository and serve the root folder.
 
@@ -39,7 +40,8 @@ To play from GitHub, enable **Settings → Pages** for this repository and serve
 ## Build
 
 The game is written as plain scripts in `src/`. All of them share one global
-namespace, `window.RS`. `build.js` inlines them into `src/00_shell.html` in a fixed order:
+namespace, `window.RS`. `build.js` inlines three.js (`vendor/three.min.js`, r128)
+and the modules, in a fixed order, into `src/00_shell.html`, one `<script>` per module:
 
 ```sh
 node build.js        # or: npm run build
@@ -53,13 +55,16 @@ This writes three files:
 | `dist/weapons_hold.html` | the same page; the browser checks load this one |
 | `dist/weapons_hold.artifact.html` | the claude.ai artifact flavour, with no doctype/html/head/body skeleton |
 
-Bump `VERSION` in `build.js` to change the version shown in the title and in `window.RS.VERSION`.
+- **Version:** the `VERSION` file (Major.Minor.Patch.Build) is stamped into the title and `window.RS.VERSION`.
+- **Module list:** new modules go into the `ORDER` list in `build.js`. The build fails if a file in `src/` is missing from `ORDER`, or the other way round.
+- **Commit the build:** commit `index.html` after building. CI fails when it is out of date with `src/`.
 
 ## Source map
 
 | File | Role |
 | --- | --- |
-| `src/00_shell.html` | Page markup and CSS; the scripts are injected at `<!-- RS_SCRIPTS -->` |
+| `src/00_shell.html` | Page markup and CSS; three.js goes in at `<!-- RS_THREE -->` and the modules at `<!-- RS_SCRIPTS -->` |
+| `vendor/three.min.js` | three.js r128 (MIT, see `vendor/three.LICENSE`), bundled so the game never waits on a CDN |
 | `src/contracts.js` | Shared contract: units, enums, event bus (`RS.bus`) and event payloads, sim state shape, command API |
 | `src/content.js` | `RS.content`: weapon and threat data, the Shift 0 range check, seeded free-play shift generator |
 | `src/campaign.js` | `RS.campaign`: the six Kessel campaign shifts, story, budget and grading |
@@ -79,19 +84,24 @@ Bump `VERSION` in `build.js` to change the version shown in the title and in `wi
 ## Tests
 
 ```sh
-npm test                 # node-only: test/sim.test.js, test/content.test.js, test/campaign.test.js
-npm run check:browser    # Playwright + Chromium checks (browser, scene, ui, meta, audio)
-npm run balance          # tools/balance.js: a bot operator plays shifts and prints weapon usage
+npm test                 # node tests: test/*.test.js (sim, content, campaign, fixes); no install needed
+npm run check:browser    # Playwright checks: test/*.check.js (browser, ui, meta, scene, audio)
+npm run balance          # tools/balance.js: a bot operator plays shifts and prints outcomes per weapon
 ```
 
-**Known state:** the tests came from an earlier version of the game and were not
-updated alongside V1.3/V1.4, so several of them fail against the current code:
+- **Runner:** `test/run.js` runs every file, even after a failure, and exits 1 if any failed.
+- **Browser checks:**
+  - They need `npm install` and a Chromium that Playwright can launch: run `npx playwright install chromium`, or set `PLAYWRIGHT_CHROMIUM`.
+  - Their shared setup is in `test/_browser.js`.
+  - They run with software WebGL and are slow.
+- **CI:**
+  - GitHub Actions (`.github/workflows/ci.yml`) builds, checks that `index.html` is current, and runs the node tests on every push and pull request.
+  - The browser checks run when you start the workflow by hand with **browser** ticked.
 
-- `content.test.js` still expects the old Lance and Dart ranges and speeds.
-- `campaign.test.js` rejects the new per-shift `weather` field.
-- `browser.check.js`, `ui.check.js` and a few others expect the pre-V1.4 layout (35 % hatch, 4-chip launcher strip).
+## License
 
-Treat those failures as out-of-date tests, not game bugs, until the tests are updated.
+Copyright © 2026 Prairie Blue Studio. All rights reserved. See [`LICENSE`](LICENSE).
+three.js is used under the MIT License (`vendor/three.LICENSE`).
 
 ## Provenance
 

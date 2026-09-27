@@ -195,7 +195,7 @@
       return `<button class="mrow${next ? ' next' : ''}" data-m="pick" data-i="${i}" ${locked ? 'disabled' : ''}><span><b>SHIFT ${i + 1}</b>${esc(nm)} <span class="muted">· ${mmss(s.duration)}</span>${mds}</span>${badge}</button>`;
     }).join('');
     show('map', `<div class="kick">CAMPAIGN</div><h2>BATTERY KESSEL</h2><p class="muted">Six watches on the Varenna border. Grade D or better unlocks the next shift.</p>` +
-      rows + `<div class="box"><div class="sec">MAGAZINE (NEXT SHIFT)</div>${resTxt(camp.reserve)}</div>` + btn('menu', '◂ MENU', 'dim'));
+      rows + `<div class="box"><div class="sec">MAGAZINE (NEXT SHIFT)</div>${resCap(camp.reserve, capOf(camp.next))}</div>` + btn('menu', '◂ MENU', 'dim'));
   }
 
   /* V1.2: each shift has variants A/B/C; one is rolled per playthrough, a retry after a failure keeps it */
@@ -215,11 +215,27 @@
     if (v) d.brief = clone(v.story);
     if (i === camp.next) {
       d.reserve = clone(camp.reserve);
-      // V1.4.3: a variant that authors a thinner magazine (C5B: 6 Lance) caps what goes into the shift; the rest waits in the depot
-      const vr = v && v.def.reserve, base = CP().shifts[i].reserve || content().reserve;
-      if (vr) for (const w of W3) if (vr[w] < base[w] && d.reserve[w] > vr[w]) { (d.held = d.held || {})[w] = d.reserve[w] - vr[w]; d.reserve[w] = vr[w]; }
+      const cap = capOf(i);
+      if (cap) for (const w in cap) if (d.reserve[w] > cap[w]) { (d.held = d.held || {})[w] = d.reserve[w] - cap[w]; d.reserve[w] = cap[w]; }
     } else d.reserve = d.reserve || clone(content().reserve);
     return d;
+  }
+  /** V1.4.3: a variant that authors a thinner magazine than its base shift (C5B: 6 Lance) caps what goes into the shift;
+      the rest waits in the depot. Returns {weapon: cap} or null. Rolls the variant (persisted), like campDef. */
+  function capOf(i) {
+    if (!(i >= 0 && i < CP().shifts.length)) return null;
+    const v = variantOf(i), vr = v && v.def.reserve, base = CP().shifts[i].reserve || content().reserve;
+    if (!vr) return null;
+    let cap = null;
+    for (const w of W3) if (vr[w] < base[w]) (cap = cap || {})[w] = vr[w];
+    return cap;
+  }
+  /** Magazine text with the variant cap applied: in-shift figures plus a depot note. */
+  function resCap(r, cap, held) {
+    const x = clone(r), h = clone(held || {});
+    if (cap) for (const w in cap) if (x[w] > cap[w]) { h[w] = (h[w] || 0) + x[w] - cap[w]; x[w] = cap[w]; }
+    const hw = W3.filter(w => h[w] > 0);
+    return resTxt(x) + (hw.length ? `<div class="muted" style="font-size:11px">This shift's magazine is capped: ${hw.map(w => h[w] + ' ' + WL[w]).join(', ')} wait${hw.length > 1 || h[hw[0]] !== 1 ? '' : 's'} in the depot for later shifts.</div>` : '');
   }
   function pick(i) {
     if (i > camp.next) return;
@@ -291,7 +307,7 @@
       (friends.length ? `<div class="box"><div class="sec">FRIENDLY TRAFFIC</div>${fr}</div>` : '') +
       `<div class="box" id="m-wx"><div class="sec">CONDITIONS</div><p><b class="cyan">${esc(wxLine(def.weather))}</b></p>${evs ? `<ul>${evs}</ul>` : ''}</div>` +
       `<div class="box"><div class="sec">RULES OF ENGAGEMENT</div>Weapons ${roe}</div>` +
-      `<div class="box"><div class="sec">RESERVE · ${def.endless ? 'ENDLESS WATCH' : 'WATCH ' + mmss(def.duration)}</div>${resTxt(r)}<div class="muted" style="font-size:11px">Launchers start loaded (Lance 2×4, Dart 4, Harrow 600).</div></div>` +
+      `<div class="box"><div class="sec">RESERVE · ${def.endless ? 'ENDLESS WATCH' : 'WATCH ' + mmss(def.duration)}</div>${resCap(r, null, def.held)}<div class="muted" style="font-size:11px">Launchers start loaded (Lance 2×4, Dart 4, Harrow 600).</div></div>` +
       (notes ? `<div class="box"><div class="sec">HQ NOTES</div><ul>${notes}</ul></div>` : '') +
       btn('begin', sv ? 'BEGIN RUN ▸' : 'BEGIN SHIFT ▸', 'pri', 'id="m-begin"') + btn(mode.type === 'campaign' ? 'map' : sv ? 'surv' : 'free', '◂ BACK', 'dim'));
   }
@@ -583,7 +599,7 @@
       `<p class="muted">Budget ${pend.credits} cr${esc(bonus)}. Unused reserve carries over; unspent credits are banked.</p>` +
       `<div class="box">${rows}</div>` +
       `<div class="box tot"><span>SPEND <b class="${left < 0 ? 'red' : 'amber'}" id="m-spent">${spent}</b> cr</span><span>LEFT <b class="ok" id="m-left">${left}</b> cr</span></div>` +
-      `<div class="box"><div class="sec">RESERVE FOR SHIFT ${pend.idx + 1}</div>${resTxt({ lance: camp.reserve.lance + buy.lance, dart: camp.reserve.dart + buy.dart, harrow: camp.reserve.harrow + buy.harrow })}</div>` +
+      `<div class="box"><div class="sec">RESERVE FOR SHIFT ${pend.idx + 1}</div>${resCap({ lance: camp.reserve.lance + buy.lance, dart: camp.reserve.dart + buy.dart, harrow: camp.reserve.harrow + buy.harrow }, capOf(pend.idx))}</div>` +
       btn('confirm', 'CONFIRM ▸ BRIEFING', 'pri', 'id="m-confirm"') + btn('map', '◂ CAMPAIGN MAP', 'dim'));
   }
   function stepBuy(w, dir) {

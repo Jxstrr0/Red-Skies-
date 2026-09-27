@@ -30,8 +30,22 @@
     if (RS.scene && h) RS.scene.resize(h.clientWidth, h.clientHeight);
   }
 
+  // V1.4.3 perf: ~60 fps cap on 90/120 Hz screens (frame-budget accumulator, so 90 Hz still averages 60), and no 3-D render
+  // while an opaque menu (pause, debrief, map, briefing…) or the ROTATE cover hides it; the sim keeps its own clock
+  const FRAME_MS = 1000 / 60;
+  let capAcc = 0, capPrev = 0, rotMq = null;
+  try { rotMq = window.matchMedia('(orientation: landscape) and (max-height: 560px)'); } catch (e) { /* */ }
+  function covered() {
+    const m = $('meta');
+    return (!!(m && m.classList.contains('on')) && !document.body.classList.contains('titling')) || !!(rotMq && rotMq.matches);
+  }
+  RS.covered = covered;
   function frame(now) {
     requestAnimationFrame(frame);
+    const gap = capPrev ? now - capPrev : FRAME_MS; capPrev = now;
+    capAcc = Math.min(capAcc + gap, 3 * FRAME_MS);
+    if (capAcc < FRAME_MS - 1) return;
+    capAcc = Math.max(0, capAcc - FRAME_MS);
     const dt = Math.min(0.25, Math.max(0, (now - last) / 1000));
     last = now;
     acc += dt;
@@ -39,7 +53,7 @@
     if (paused || held) acc = 0;
     while (acc >= RS.SIM_DT && n < 5) { RS.sim.step(); acc -= RS.SIM_DT; n++; }
     if (n === 5) acc = 0;                                  // clamp catch-up
-    RS.scene.render(dt, RS.sim.state);
+    if (!covered()) RS.scene.render(dt, RS.sim.state);
     frames++; fpsT += dt;
     if (fpsT >= 0.5) {
       fps = frames / fpsT; frames = 0; fpsT = 0;
