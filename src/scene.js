@@ -760,9 +760,18 @@
     }
   }
   function makeModel(spec, lod) {
-    if (lod === 'far') {                    // V1.4.3 perf: 2.5–4.5 km (2–5 px) — the ~150-tri primitive stand-in, not the 10–12k-tri low model
-      const key = spec.kind + '|far';
-      const t = tpl[key] || (tpl[key] = models.placeholder ? models.placeholder(spec.kind, {}) : models.create(spec.kind, { placeholder: true }));   // vendor wrappers ignore opts.placeholder
+    if (lod === 'far') {                    // V1.4.3 perf: 2.5–4.5 km (2–5 px) — the ~110-tri primitive stand-in, not the 10–25k-tri low model
+      const key = spec.kind + JSON.stringify(spec.opts || {}) + '|far';
+      let t = tpl[key];
+      if (!t) {
+        t = tpl[key] = models.placeholder ? models.placeholder(spec.kind, {}) : models.create(spec.kind, { placeholder: true });   // vendor wrappers ignore opts.placeholder
+        // same silhouette size as the model it stands in for (the primitive jet is ~14.6 m; the vendor jets are 20–26 m), so no size pop at the switch
+        try {
+          const size = o => new THREE.Box3().setFromObject(o).getSize(new V3()), a = size(makeModel(spec, 'low')), b = size(t);
+          const k = Math.max(a.x, a.z) / Math.max(b.x, b.z);
+          if (k > 0.5 && k < 4) t.scale.setScalar(k);
+        } catch (e) { /* keep native size */ }
+      }
       const o = cloneBare(t); o.userData = { nozzles: null, length: 10, rotor: null };
       return o;
     }

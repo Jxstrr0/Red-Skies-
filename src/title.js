@@ -59,6 +59,7 @@
   const ORDER = ['L2', 'L3', 'L1', 'L2', 'L3', 'L1', 'L2', 'L3', 'L1', 'L2', 'L3', 'L1'];
   function fire(withSound) {
     if (!on || !RS.scene.titleOn) return null;
+    if (RS.covered && RS.covered()) return null;        // V1.4.3: the scene is paused under the ROTATE cover — hold the show round
     for (let i = 0; i < 3; i++) {
       const id = ORDER[shots % ORDER.length]; shots++;
       const mid = RS.scene.titleLaunch(id);
