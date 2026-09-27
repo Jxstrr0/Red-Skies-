@@ -18,19 +18,23 @@ To play from GitHub, enable **Settings → Pages** for this repository and serve
 ### How a shift plays
 
 - **Radar scope:** tracks appear as the sweep finds them. Tap one to select it,
-  or cycle targets with ◀ ▶. Transmitting for a long time invites anti-radiation
-  missiles (ARMs), so switch **RADAR** off when you can.
+  or cycle targets with ◀ ▶. After 90 s of continuous transmission, enemy ARM
+  carriers start firing anti-radiation missiles (ARMs) at your radar, so switch
+  **RADAR** off when you can. Lance and Dart need the radar on to fire; the gun does not.
 - **IFF → FRIEND / HOSTILE:** interrogate the selected track, then classify it.
   Altitude, speed, heading, corridor and radio calls are your other cues.
 - **ASSIGN → FIRE:** pick a launcher, lift the cover and hold **FIRE**.
   Rules of engagement (ROE) are HOLD / TIGHT / FREE, and HQ changes them
   during a shift. Under TIGHT you may only engage tracks classified HOSTILE.
 - **Weapons:** *Lance*, a long-range SAM (3–60 km) · *Dart*, a short-range SAM (1–25 km)
-  · *Harrow*, a gun (0–4 km).
+  · *Harrow*, a gun (0–4 km). The battery has two Lance launchers, one Dart launcher and the gun.
+- **Grading:** each shift is graded A–F. The score is weighted 40 % on asset health
+  and 20 % each on leakers, ammo efficiency and reaction time. Fratricide or losing
+  the defended asset is an automatic F.
 - **Modes:** a guided *Training Watch*, a six-shift campaign (*First Watch* to
-  *Red Skies*) with briefings, debriefs, grades and resupply, seeded *Free watch*
-  skirmishes, and an endless *Survival* mode. Progress is saved in `localStorage`
-  (keys prefixed `redskies.v1.`).
+  *Red Skies*, each shift with three mission variants) with briefings, debriefs and a
+  resupply shop, seeded *Free watch* skirmishes, and an endless *Survival* mode.
+  Progress is saved in `localStorage` (keys prefixed `redskies.v1.`).
 
 ## Build
 
