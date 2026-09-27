@@ -183,6 +183,10 @@
     const on = RS.bus.on;
     RS.bus.on('PAUSE', p => { try { if (ctx) { if (p.paused) ctx.suspend(); else ctx.resume(); } } catch (e) { } });
     RS.bus.on('SHIFT_START', () => { try { if (ctx && ctx.state === 'suspended' && !(RS.main && RS.main.paused)) ctx.resume(); } catch (e) { } });
+    // V1.4.3: go quiet whenever the app is hidden (menus and the title backdrop too, not only a running shift)
+    document.addEventListener('visibilitychange', () => {
+      try { if (!ctx) return; if (document.hidden) ctx.suspend(); else if (!(RS.main && RS.main.paused)) ctx.resume(); } catch (e) { /* */ }
+    });
     on('SIM_TICK', () => {
       const r = RS.sim && RS.sim.state && RS.sim.state.radar;
       if (!r) return;
@@ -224,7 +228,7 @@
     on('UI_FIRE_ARMED', p => { noise(0.03, p.armed ? 0.3 : 0.15, 2400, 'highpass'); tone(p.armed ? 130 : 180, 0.04, 'square', 0.12); });
     on('COMMS', p => { if (p.priority === 'high') { noise(0.14, 0.12, 1500, 'bandpass'); tone(1400, 0.06, 'sine', 0.08, 1900, 0.16); } });
     on('ALARM', p => alarm(p.kind, !!p.on));
-    on('ARM_INBOUND', () => buzz([100, 50, 100, 50, 100]));
+    on('ARM_INBOUND', p => { if (!p.tracked) buzz([100, 50, 100, 50, 100]); });
     on('ARM_IMPACT', () => { if (!sfxOn()) boom(0, 0.5); });
     on('ASSET_HIT', () => { if (!sfxOn()) boom(0.3, 0.45); });
     on('FRATRICIDE', () => buzz([400]));

@@ -172,7 +172,11 @@
         released: false, egress: false, armFired: false, shotAt: false, prevR: 1e9,
         wave: s.wave || 0, firstShot: null, spd0: s.spd, ev: null, evShow: null, evNext: 0, evaded: false, dove: false, chaff: s.kind === K.JET_HOSTILE ? CHAFF_N : 0
       };
-      if (e.popup) e.alt = Math.min(e.alt, e.popup.hideAlt * 0.8);
+      if (e.corridor) {                           // V1.4.3: join the corridor ahead of us (skip waypoints farther from its end than the spawn point)
+        const end = e.corridor[e.corridor.length - 1], d = q => Math.hypot(q[0] - end[0], q[1] - end[1]), here = d([e.x, e.y]);
+        while (e.wp < e.corridor.length - 1 && d(e.corridor[e.wp]) > here) e.wp++;
+      }
+      if (e.popup) { e.alt = Math.min(e.alt, e.popup.hideAlt * 0.8); e.baseAlt = Math.max(e.baseAlt, e.popup.hideAlt * 2.5); }   // V1.4.3: hide low, pop up to 2.5×hideAlt
       if (!HOSTILE[s.kind] && !e.corridor && (s.orbit || s.kind === K.JET_FRIEND)) {
         const o = s.orbit || { cx: s.x, cy: s.y, r: 8 };
         e.orbit = { cx: o.cx, cy: o.cy, r: o.r || 8, dir: 1 };
@@ -313,7 +317,7 @@
   function launchArm(c) {
     c.armFired = true;
     const a = spawn({ kind: K.ARM, x: c.x, y: c.y, alt: Math.min(c.alt, 3000), hdg: bearingOf(-c.x, -c.y), spd: ARM_SPD });
-    emit('ARM_INBOUND', { id: a.id, eta: rnd(Math.hypot(a.x, a.y) * 1000 / ARM_SPD, 1) });
+    emit('ARM_INBOUND', { id: null, eta: rnd(Math.hypot(a.x, a.y) * 1000 / ARM_SPD, 1), tracked: false });   // V1.4.3: no track yet (was the entity id)
     alarm('arm', true);
   }
 
@@ -322,6 +326,7 @@
     const radar = sim.state.radar;
     const horizon = 4.12 * (Math.sqrt(RADAR_H) + Math.sqrt(Math.max(0, e.alt)));
     if (r > horizon) return 0;
+    if (e.popup && e.alt < e.popup.hideAlt && r > e.popup.atKm) return 0;   // V1.4.3: pop-up helo masked by terrain until it is inside atKm
     const eff = radar.rangeKm * Math.pow(Math.max(0.01, e.rcs), 0.25) * radar.health;
     const x = r / eff;
     if (x >= 1) return 0;
@@ -351,6 +356,8 @@
       s.tracks.push(tr);
       s.tracks.sort((a, b) => (a.id < b.id ? -1 : 1));
       emit('TRACK_NEW', { id: tr.id, track: snapshot(tr) });
+      // V1.4.3: tell the UI which TRACK is the ARM (warning receiver), so the scope draws the ARM symbol
+      if (e.kind === K.ARM) emit('ARM_INBOUND', { id: tr.id, eta: rnd(Math.hypot(e.x, e.y) * 1000 / ARM_SPD, 1), tracked: true });
     }
   }
 
@@ -524,8 +531,11 @@
   }
 
   function startReload(L) {
-    const res = sim.state.battery.reserve;
-    if (L.reloadT > 0 || L.rounds >= L.max || !(res[L.weapon] > 0)) return false;
+    const b = sim.state.battery, res = b.reserve;
+    if (L.reloadT > 0 || L.rounds >= L.max) return false;
+    // V1.4.3: rounds already promised to other launchers' running reloads are not available (no 50 s reload that ends with 0 rounds)
+    const committed = b.launchers.reduce((n, o) => n + (o !== L && o.weapon === L.weapon && o.reloadT > 0 ? o.max - o.rounds : 0), 0);
+    if (!(res[L.weapon] - committed > 0)) return false;
     const w = weap(L.weapon);
     L.ready = false; L.reloadT = L.reloadTotal = w.reloadS;
     setLock(L.id, null, false);
@@ -666,6 +676,8 @@
   function grade() {
     const s = sim.state, st = s.stats;
     if (st.fratricide || s.shift.failed || s.asset.hp <= 0) return 'F';
+    // V1.4.3: grade exactly as the debrief does (RS.campaign.grade), so the COMMS log and the debrief agree; the rule below is the sim-only fallback
+    if (RS.campaign && RS.campaign.grade) return RS.campaign.grade(st, s).grade;
     const sc = 100 * s.asset.hp - 10 * st.leakers;
     return sc >= 90 ? 'A' : sc >= 75 ? 'B' : sc >= 60 ? 'C' : sc >= 40 ? 'D' : 'F';
   }
@@ -775,8 +787,11 @@
       const p = pendLaunch[i];
       if (s.t < p.at) continue;
       pendLaunch.splice(i, 1);
-      const L = launcher(p.lid);
-      if (L.rounds > 0 && !L.jammed && !p.e.dead) launchMissile(L, p.trackId, p.e, p.pk);
+      // V1.4.3: the second salvo round re-checks everything the first one did (ROE, FRIEND, assignment, radar, envelope)
+      const L = launcher(p.lid), tr = findTrack(p.trackId);
+      if (!tr || p.e.dead || roeReason(tr) || s.battery.assignedTo[p.trackId] !== p.lid) continue;
+      const sol = solution(tr, L);
+      if (sol.ok) launchMissile(L, p.trackId, p.e, sol.pk);
     }
     updateMissiles(dt);
     for (let i = pendGun.length - 1; i >= 0; i--) {

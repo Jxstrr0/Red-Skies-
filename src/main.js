@@ -80,6 +80,12 @@
     });
     window.addEventListener('resize', resize);
     window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+    // V1.4.3: the ROTATE TO PORTRAIT cover hides the game, so pause the shift under it (the pause menu waits for the player)
+    try {
+      const mq = window.matchMedia('(orientation: landscape) and (max-height: 560px)');
+      const onRot = () => { if (mq.matches && RS.meta && RS.meta.pause) RS.meta.pause(); };
+      if (mq.addEventListener) mq.addEventListener('change', onRot); else if (mq.addListener) mq.addListener(onRot);
+    } catch (e) { /* no matchMedia */ }
     // stop double-tap zoom / pinch on iOS
     document.addEventListener('gesturestart', e => e.preventDefault());
     // (double-tap zoom is disabled via touch-action: manipulation in CSS)

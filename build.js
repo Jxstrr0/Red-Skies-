@@ -10,10 +10,11 @@ const MARKER = '<!-- RS_SCRIPTS -->';
 
 const shell = fs.readFileSync(path.join(SRC, '00_shell.html'), 'utf8');
 if (!shell.includes(MARKER)) { console.error('build: marker ' + MARKER + ' missing in shell'); process.exit(1); }
-const js = ORDER.filter(f => fs.existsSync(path.join(SRC, f))).map(f => `/* == ${f} == */\n` + fs.readFileSync(path.join(SRC, f), 'utf8')).join('\n');
-if (/<\/script/i.test(js)) { console.error('build: "</script" found inside sources'); process.exit(1); }
+const js = ORDER.filter(f => fs.existsSync(path.join(SRC, f))).map(f => `/* == ${f} == */\n` + fs.readFileSync(path.join(SRC, f), 'utf8'));
+if (js.some(s => /<\/script/i.test(s))) { console.error('build: "</script" found inside sources'); process.exit(1); }
+// one <script> per module: a module that throws (e.g. three.js failed to load) cannot stop main.js from booting and reporting it
 const html = shell.replace(/%RS_VERSION%/g, VERSION)
-  .replace(MARKER, () => `<script>\nwindow.RS = window.RS || {}; window.RS.VERSION = '${VERSION}';\n` + js + '\n</script>');
+  .replace(MARKER, () => `<script>window.RS = window.RS || {}; window.RS.VERSION = '${VERSION}';</script>\n` + js.map(s => '<script>\n' + s + '\n</script>').join('\n'));
 fs.mkdirSync(path.dirname(OUT), { recursive: true });
 fs.writeFileSync(OUT, html);
 fs.writeFileSync(path.join(__dirname, 'index.html'), html);   // repo-root copy: open it directly or serve it with GitHub Pages

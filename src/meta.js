@@ -213,8 +213,12 @@
   function campDef(i) {
     const v = variantOf(i), d = clone(v ? v.def : CP().shifts[i]);
     if (v) d.brief = clone(v.story);
-    if (i === camp.next) d.reserve = clone(camp.reserve);
-    else d.reserve = d.reserve || clone(content().reserve);
+    if (i === camp.next) {
+      d.reserve = clone(camp.reserve);
+      // V1.4.3: a variant that authors a thinner magazine (C5B: 6 Lance) caps what goes into the shift; the rest waits in the depot
+      const vr = v && v.def.reserve, base = CP().shifts[i].reserve || content().reserve;
+      if (vr) for (const w of W3) if (vr[w] < base[w] && d.reserve[w] > vr[w]) { (d.held = d.held || {})[w] = d.reserve[w] - vr[w]; d.reserve[w] = vr[w]; }
+    } else d.reserve = d.reserve || clone(content().reserve);
     return d;
   }
   function pick(i) {
@@ -333,6 +337,7 @@
       if (mode.frontier && !g.failed) {
         camp.next = mode.idx + 1;
         camp.reserve = clone(s.battery.reserve);
+        if (curDef && curDef.held) for (const w of W3) camp.reserve[w] += curDef.held[w] || 0;   // V1.4.3: depot stock held back by a thin-magazine variant
         camp.pending = camp.next < n ? { idx: camp.next, credits: CP().budget[camp.next] + (CP().bonus[g.grade] || 0) + (camp.bank || 0) } : null;
         camp.bank = 0;
         lastEnd.advanced = true;

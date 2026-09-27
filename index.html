@@ -450,8 +450,8 @@ body.titling #meta .sub { color: #e6b8a4; text-shadow: 0 1px 3px #000; }
 <div id="endcard" class="overlay"><div class="card" id="endbody"></div></div>
 <div id="rotate" class="overlay"><div class="icon"></div><div>ROTATE TO PORTRAIT</div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>window.RS = window.RS || {}; window.RS.VERSION = '1.4.2.0';</script>
 <script>
-window.RS = window.RS || {}; window.RS.VERSION = '1.4.2.0';
 /* == contracts.js == */
 /* =====================================================================
    RED SKIES — contracts.js  (FROZEN after Run A; edit only by the orchestrator)
@@ -505,7 +505,9 @@ RS.RANDOM_EVENT = { RADAR_FAULT:'radar_fault', LAUNCHER_JAM:'launcher_jam', COMM
    RADAR_STATE     {on:boolean}
    RADAR_WARN      {seconds}                                 continuous emission is getting dangerous (ARM risk rising)
    JAMMING         {level:0..1, bearing}                     0 = clear
-   ARM_INBOUND     {id, eta}                                 anti-radiation missile launched at us
+   ARM_INBOUND     {id, eta, tracked}                        anti-radiation missile launched at us: once at launch
+                                                             (id null, tracked false), again when the ARM becomes a track
+                                                             (id = that track id, tracked true)
    ARM_IMPACT      {damage:0..1}                             radar hit (radar may go down)
    ASSET_HIT       {byId, damage:0..1}                       defended asset struck
    LEAKER          {id}                                      hostile passed the defended line
@@ -747,6 +749,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
    state.stats + { firstShotKills (hostiles killed by the first round/burst fired at them), shotsAtFriends (rounds/bursts fired at
        true friendlies), maxEmit (longest continuous emission s), waves (survival: waves fully survived) }            */
 
+</script>
+<script>
 /* == content.js == */
 /* =====================================================================
    RED SKIES — content.js   RS.content : pure data + generators
@@ -1030,6 +1034,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   RS.content = { weapons, reserve, threats, shifts: [shift0], makeFreeShift, makeSurvivalShift, makeSurvivalWave, pickWeather, mulberry32, airbase: AIRBASE, friendlyKinds: FRIENDLY };
 })();
 
+</script>
+<script>
 /* == campaign.js == */
 /* =====================================================================
    RED SKIES — campaign.js   RS.campaign : the Kessel campaign (6 shifts) + grading.
@@ -1824,6 +1830,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   };
 })();
 
+</script>
+<script>
 /* == sim.js == */
 /* =====================================================================
    RED SKIES — sim.js   RS.sim : air picture, radar, tracks, IFF, weapons.
@@ -1999,7 +2007,11 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
         released: false, egress: false, armFired: false, shotAt: false, prevR: 1e9,
         wave: s.wave || 0, firstShot: null, spd0: s.spd, ev: null, evShow: null, evNext: 0, evaded: false, dove: false, chaff: s.kind === K.JET_HOSTILE ? CHAFF_N : 0
       };
-      if (e.popup) e.alt = Math.min(e.alt, e.popup.hideAlt * 0.8);
+      if (e.corridor) {                           // V1.4.3: join the corridor ahead of us (skip waypoints farther from its end than the spawn point)
+        const end = e.corridor[e.corridor.length - 1], d = q => Math.hypot(q[0] - end[0], q[1] - end[1]), here = d([e.x, e.y]);
+        while (e.wp < e.corridor.length - 1 && d(e.corridor[e.wp]) > here) e.wp++;
+      }
+      if (e.popup) { e.alt = Math.min(e.alt, e.popup.hideAlt * 0.8); e.baseAlt = Math.max(e.baseAlt, e.popup.hideAlt * 2.5); }   // V1.4.3: hide low, pop up to 2.5×hideAlt
       if (!HOSTILE[s.kind] && !e.corridor && (s.orbit || s.kind === K.JET_FRIEND)) {
         const o = s.orbit || { cx: s.x, cy: s.y, r: 8 };
         e.orbit = { cx: o.cx, cy: o.cy, r: o.r || 8, dir: 1 };
@@ -2140,7 +2152,7 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   function launchArm(c) {
     c.armFired = true;
     const a = spawn({ kind: K.ARM, x: c.x, y: c.y, alt: Math.min(c.alt, 3000), hdg: bearingOf(-c.x, -c.y), spd: ARM_SPD });
-    emit('ARM_INBOUND', { id: a.id, eta: rnd(Math.hypot(a.x, a.y) * 1000 / ARM_SPD, 1) });
+    emit('ARM_INBOUND', { id: null, eta: rnd(Math.hypot(a.x, a.y) * 1000 / ARM_SPD, 1), tracked: false });   // V1.4.3: no track yet (was the entity id)
     alarm('arm', true);
   }
 
@@ -2149,6 +2161,7 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
     const radar = sim.state.radar;
     const horizon = 4.12 * (Math.sqrt(RADAR_H) + Math.sqrt(Math.max(0, e.alt)));
     if (r > horizon) return 0;
+    if (e.popup && e.alt < e.popup.hideAlt && r > e.popup.atKm) return 0;   // V1.4.3: pop-up helo masked by terrain until it is inside atKm
     const eff = radar.rangeKm * Math.pow(Math.max(0.01, e.rcs), 0.25) * radar.health;
     const x = r / eff;
     if (x >= 1) return 0;
@@ -2178,6 +2191,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
       s.tracks.push(tr);
       s.tracks.sort((a, b) => (a.id < b.id ? -1 : 1));
       emit('TRACK_NEW', { id: tr.id, track: snapshot(tr) });
+      // V1.4.3: tell the UI which TRACK is the ARM (warning receiver), so the scope draws the ARM symbol
+      if (e.kind === K.ARM) emit('ARM_INBOUND', { id: tr.id, eta: rnd(Math.hypot(e.x, e.y) * 1000 / ARM_SPD, 1), tracked: true });
     }
   }
 
@@ -2351,8 +2366,11 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   }
 
   function startReload(L) {
-    const res = sim.state.battery.reserve;
-    if (L.reloadT > 0 || L.rounds >= L.max || !(res[L.weapon] > 0)) return false;
+    const b = sim.state.battery, res = b.reserve;
+    if (L.reloadT > 0 || L.rounds >= L.max) return false;
+    // V1.4.3: rounds already promised to other launchers' running reloads are not available (no 50 s reload that ends with 0 rounds)
+    const committed = b.launchers.reduce((n, o) => n + (o !== L && o.weapon === L.weapon && o.reloadT > 0 ? o.max - o.rounds : 0), 0);
+    if (!(res[L.weapon] - committed > 0)) return false;
     const w = weap(L.weapon);
     L.ready = false; L.reloadT = L.reloadTotal = w.reloadS;
     setLock(L.id, null, false);
@@ -2493,6 +2511,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   function grade() {
     const s = sim.state, st = s.stats;
     if (st.fratricide || s.shift.failed || s.asset.hp <= 0) return 'F';
+    // V1.4.3: grade exactly as the debrief does (RS.campaign.grade), so the COMMS log and the debrief agree; the rule below is the sim-only fallback
+    if (RS.campaign && RS.campaign.grade) return RS.campaign.grade(st, s).grade;
     const sc = 100 * s.asset.hp - 10 * st.leakers;
     return sc >= 90 ? 'A' : sc >= 75 ? 'B' : sc >= 60 ? 'C' : sc >= 40 ? 'D' : 'F';
   }
@@ -2602,8 +2622,11 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
       const p = pendLaunch[i];
       if (s.t < p.at) continue;
       pendLaunch.splice(i, 1);
-      const L = launcher(p.lid);
-      if (L.rounds > 0 && !L.jammed && !p.e.dead) launchMissile(L, p.trackId, p.e, p.pk);
+      // V1.4.3: the second salvo round re-checks everything the first one did (ROE, FRIEND, assignment, radar, envelope)
+      const L = launcher(p.lid), tr = findTrack(p.trackId);
+      if (!tr || p.e.dead || roeReason(tr) || s.battery.assignedTo[p.trackId] !== p.lid) continue;
+      const sol = solution(tr, L);
+      if (sol.ok) launchMissile(L, p.trackId, p.e, sol.pk);
     }
     updateMissiles(dt);
     for (let i = pendGun.length - 1; i >= 0; i--) {
@@ -2873,6 +2896,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   RS.sim = sim;
 })();
 
+</script>
+<script>
 /* == models.js == */
 /* =====================================================================
    RED SKIES — models.js   RS.models v0 (placeholder primitives)
@@ -3103,6 +3128,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   window.Models = RS.models;
 })();
 
+</script>
+<script>
 /* == models_weapons.js == */
 /* ============================================================================
  * models_weapons.js — Red Skies / Weapons Hold · air-launched weapons
@@ -3501,6 +3528,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   M.version = (M.version || '0') + '+' + Weapons.version;
 })();
 
+</script>
+<script>
 /* == models_weapons_east.js == */
 /* ============================================================================
  * models_weapons_east.js — Red Skies / Weapons Hold · friendly-side weapons
@@ -3997,6 +4026,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   M.version = (M.version || '0') + '+' + Weapons.version;
 })();
 
+</script>
+<script>
 /* == models_launchers.js == */
 /* ============================================================================
  * models_launchers.js — Red Skies / Weapons Hold · SAM launcher vehicles
@@ -4662,6 +4693,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   M.version = (M.version || '0') + '+' + Launchers.version;
 })();
 
+</script>
+<script>
 /* == models_ground.js == */
 /* ============================================================================
  * models_ground.js — Red Skies · battery ground equipment (radars, gun, CP, power)
@@ -5711,6 +5744,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
   M.version = (M.version || '0') + '+' + Ground.version;
 })();
 
+</script>
+<script>
 /* == models_jets.js == */
 /* ============================================================================
  * models_jets.js — Red Skies / Weapons Hold · hostile jet models
@@ -6810,6 +6845,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   M.version = (M.version || '0') + '+' + Jets.version;
 })();
 
+</script>
+<script>
 /* == jet_friend.js == */
 /* =====================================================================
  * jet_friend.js — Red Skies / Weapons Hold · Models API part  (v2.1.0)
@@ -7558,6 +7595,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   ModelParts.jet_friend.schemes = SCHEMES;
 })(typeof window !== 'undefined' ? window : globalThis);
 
+</script>
+<script>
 /* == scene.js == */
 /* =====================================================================
    RED SKIES — scene.js   RS.scene : the view out of the shelter hatch.
@@ -9689,6 +9728,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   RS.scene = api;
 })();
 
+</script>
+<script>
 /* == cabin.js == */
 /* =====================================================================
    RED SKIES — cabin.js   RS.cabin : the Pantsir operator cabin (V1.4).
@@ -10414,6 +10455,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bindInput); else bindInput();
 })();
 
+</script>
+<script>
 /* == audio.js == */
 /* =====================================================================
    RED SKIES — audio.js   RS.audio : procedural WebAudio synth + haptics (no assets).
@@ -10600,6 +10643,10 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     const on = RS.bus.on;
     RS.bus.on('PAUSE', p => { try { if (ctx) { if (p.paused) ctx.suspend(); else ctx.resume(); } } catch (e) { } });
     RS.bus.on('SHIFT_START', () => { try { if (ctx && ctx.state === 'suspended' && !(RS.main && RS.main.paused)) ctx.resume(); } catch (e) { } });
+    // V1.4.3: go quiet whenever the app is hidden (menus and the title backdrop too, not only a running shift)
+    document.addEventListener('visibilitychange', () => {
+      try { if (!ctx) return; if (document.hidden) ctx.suspend(); else if (!(RS.main && RS.main.paused)) ctx.resume(); } catch (e) { /* */ }
+    });
     on('SIM_TICK', () => {
       const r = RS.sim && RS.sim.state && RS.sim.state.radar;
       if (!r) return;
@@ -10641,7 +10688,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     on('UI_FIRE_ARMED', p => { noise(0.03, p.armed ? 0.3 : 0.15, 2400, 'highpass'); tone(p.armed ? 130 : 180, 0.04, 'square', 0.12); });
     on('COMMS', p => { if (p.priority === 'high') { noise(0.14, 0.12, 1500, 'bandpass'); tone(1400, 0.06, 'sine', 0.08, 1900, 0.16); } });
     on('ALARM', p => alarm(p.kind, !!p.on));
-    on('ARM_INBOUND', () => buzz([100, 50, 100, 50, 100]));
+    on('ARM_INBOUND', p => { if (!p.tracked) buzz([100, 50, 100, 50, 100]); });
     on('ARM_IMPACT', () => { if (!sfxOn()) boom(0, 0.5); });
     on('ASSET_HIT', () => { if (!sfxOn()) boom(0.3, 0.45); });
     on('FRATRICIDE', () => buzz([400]));
@@ -10712,6 +10759,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   RS.audio = api;
 })();
 
+</script>
+<script>
 /* == audio_weapons.js == */
 /* ============================================================================
  * audio_weapons.js — Red Skies / Weapons Hold · weapon sound engine
@@ -11285,6 +11334,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   if (window.RS) window.RS.sfx = api;
 })();
 
+</script>
+<script>
 /* == ui.js == */
 /* =====================================================================
    RED SKIES — ui.js   RS.ui : desk monitors + thumb zone.
@@ -12324,7 +12375,11 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     on('FIRE_REJECTED', p => { rejectSeen = true; toast(why(p.reason), 'red'); addLog(`FIRE REJECTED ${T(p.id || '')}: ${short(p.reason)}`, ''); });
     on('RELOAD_START', p => addLog(`${p.launcherId} RELOADING ${Math.round(p.seconds)} s`, ''));
     on('RELOAD_DONE', p => addLog(`${p.launcherId} RELOADED`, 'sys'));
-    on('ARM_INBOUND', p => { armIds.add(p.id); addLog(`ARM INBOUND ${T(p.id)} eta ${Math.round(p.eta)} s: GO SILENT`, 'hi'); buzz([80, 60, 80]); });
+    on('ARM_INBOUND', p => {
+      if (p.id) armIds.add(p.id);
+      if (p.tracked) addLog(`ARM ${T(p.id)} on scope, eta ${Math.round(p.eta)} s`, 'hi');
+      else { addLog(`ARM INBOUND eta ${Math.round(p.eta)} s: GO SILENT`, 'hi'); buzz([80, 60, 80]); }
+    });
     on('ARM_IMPACT', p => addLog(`ARM IMPACT: radar damage ${Math.round(p.damage * 100)}%`, 'hi'));
     on('ASSET_HIT', p => addLog(`ASSET HIT by ${T(p.byId)} (-${Math.round(p.damage * 100)}%)`, 'hi'));
     on('LEAKER', p => addLog(`LEAKER ${T(p.id)} inside defended line`, 'hi'));
@@ -12410,6 +12465,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   RS.ui = api;
 })();
 
+</script>
+<script>
 /* == eo.js == */
 /* =====================================================================
    RED SKIES — eo.js   RS.eo : EO tracker overlay (V1.3). The picture is drawn by RS.scene (RS.scene.eo: inset on the hatch
@@ -12600,6 +12657,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   RS.bus.on('SIM_TICK', () => { if (!built) init(); });
 })();
 
+</script>
+<script>
 /* == meta.js == */
 /* =====================================================================
    RED SKIES — meta.js   RS.meta : menus, briefing, debrief, resupply, free watch, settings, pause.
@@ -12816,8 +12875,12 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   function campDef(i) {
     const v = variantOf(i), d = clone(v ? v.def : CP().shifts[i]);
     if (v) d.brief = clone(v.story);
-    if (i === camp.next) d.reserve = clone(camp.reserve);
-    else d.reserve = d.reserve || clone(content().reserve);
+    if (i === camp.next) {
+      d.reserve = clone(camp.reserve);
+      // V1.4.3: a variant that authors a thinner magazine (C5B: 6 Lance) caps what goes into the shift; the rest waits in the depot
+      const vr = v && v.def.reserve, base = CP().shifts[i].reserve || content().reserve;
+      if (vr) for (const w of W3) if (vr[w] < base[w] && d.reserve[w] > vr[w]) { (d.held = d.held || {})[w] = d.reserve[w] - vr[w]; d.reserve[w] = vr[w]; }
+    } else d.reserve = d.reserve || clone(content().reserve);
     return d;
   }
   function pick(i) {
@@ -12936,6 +12999,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
       if (mode.frontier && !g.failed) {
         camp.next = mode.idx + 1;
         camp.reserve = clone(s.battery.reserve);
+        if (curDef && curDef.held) for (const w of W3) camp.reserve[w] += curDef.held[w] || 0;   // V1.4.3: depot stock held back by a thin-magazine variant
         camp.pending = camp.next < n ? { idx: camp.next, credits: CP().budget[camp.next] + (CP().bonus[g.grade] || 0) + (camp.bank || 0) } : null;
         camp.bank = 0;
         lastEnd.advanced = true;
@@ -13430,6 +13494,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     get screen() { return screen; }, get campaign() { return camp; }, get settings() { return cfg; }, get survival() { return surv; }, get last() { return lastEnd; }, get def() { return curDef; } };
 })();
 
+</script>
+<script>
 /* == title.js == */
 /* =====================================================================
    RED SKIES — title.js   RS.title : the cover page (v19).
@@ -13547,6 +13613,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     debug() { return { on, begun, shots, amb: !!amb, kills: RS.scene.titleKills || 0, t: (performance.now() - t0) / 1000 }; } };
 })();
 
+</script>
+<script>
 /* == tutorial.js == */
 /* =====================================================================
    RED SKIES — tutorial.js   RS.tutorial : guided "Training Watch" (V1.1).
@@ -13966,6 +14034,8 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   };
 })();
 
+</script>
+<script>
 /* == main.js == */
 /* =====================================================================
    RED SKIES — main.js   RS.main : boot, fixed-step loop, resize, save/load.
@@ -14049,6 +14119,12 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     });
     window.addEventListener('resize', resize);
     window.addEventListener('orientationchange', () => setTimeout(resize, 200));
+    // V1.4.3: the ROTATE TO PORTRAIT cover hides the game, so pause the shift under it (the pause menu waits for the player)
+    try {
+      const mq = window.matchMedia('(orientation: landscape) and (max-height: 560px)');
+      const onRot = () => { if (mq.matches && RS.meta && RS.meta.pause) RS.meta.pause(); };
+      if (mq.addEventListener) mq.addEventListener('change', onRot); else if (mq.addListener) mq.addListener(onRot);
+    } catch (e) { /* no matchMedia */ }
     // stop double-tap zoom / pinch on iOS
     document.addEventListener('gesturestart', e => e.preventDefault());
     // (double-tap zoom is disabled via touch-action: manipulation in CSS)

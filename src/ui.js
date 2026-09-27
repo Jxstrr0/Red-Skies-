@@ -1036,7 +1036,11 @@
     on('FIRE_REJECTED', p => { rejectSeen = true; toast(why(p.reason), 'red'); addLog(`FIRE REJECTED ${T(p.id || '')}: ${short(p.reason)}`, ''); });
     on('RELOAD_START', p => addLog(`${p.launcherId} RELOADING ${Math.round(p.seconds)} s`, ''));
     on('RELOAD_DONE', p => addLog(`${p.launcherId} RELOADED`, 'sys'));
-    on('ARM_INBOUND', p => { armIds.add(p.id); addLog(`ARM INBOUND ${T(p.id)} eta ${Math.round(p.eta)} s: GO SILENT`, 'hi'); buzz([80, 60, 80]); });
+    on('ARM_INBOUND', p => {
+      if (p.id) armIds.add(p.id);
+      if (p.tracked) addLog(`ARM ${T(p.id)} on scope, eta ${Math.round(p.eta)} s`, 'hi');
+      else { addLog(`ARM INBOUND eta ${Math.round(p.eta)} s: GO SILENT`, 'hi'); buzz([80, 60, 80]); }
+    });
     on('ARM_IMPACT', p => addLog(`ARM IMPACT: radar damage ${Math.round(p.damage * 100)}%`, 'hi'));
     on('ASSET_HIT', p => addLog(`ASSET HIT by ${T(p.byId)} (-${Math.round(p.damage * 100)}%)`, 'hi'));
     on('LEAKER', p => addLog(`LEAKER ${T(p.id)} inside defended line`, 'hi'));
