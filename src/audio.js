@@ -105,7 +105,16 @@
     } else if (loops[kind]) { loops[kind](); delete loops[kind]; }
   }
   function lock(id, on) {
-    if (on) { if (!locks[id]) locks[id] = drone(92, 'sawtooth', 0.045, 7, 0.02, 'gain', 380); }
+    // V1.1.2: fire-control lock = a clean rising "bee-deep" chirp on lock-on, then a soft short beep every ~1.5 s
+    // while the launcher holds the lock (replaces the continuous 92 Hz sawtooth growl)
+    if (on) {
+      if (locks[id]) return;
+      tone(1150, 0.07, 'sine', 0.06, 1500); tone(1500, 0.11, 'sine', 0.06, 1900, 0.09);
+      const n = Object.keys(locks).length;                       // stagger pulses when several launchers are locked
+      let iv = null;
+      const to = setTimeout(() => { iv = setInterval(() => tone(1760, 0.05, 'sine', 0.028), 1500); }, 1500 + n * 380);
+      locks[id] = () => { clearTimeout(to); if (iv) clearInterval(iv); };
+    }
     else if (locks[id]) { locks[id](); delete locks[id]; }
   }
   const stopLocks = () => Object.keys(locks).forEach(k => lock(k, false));
@@ -172,6 +181,8 @@
 
   function subscribe() {
     const on = RS.bus.on;
+    RS.bus.on('PAUSE', p => { try { if (ctx) { if (p.paused) ctx.suspend(); else ctx.resume(); } } catch (e) { } });
+    RS.bus.on('SHIFT_START', () => { try { if (ctx && ctx.state === 'suspended' && !(RS.main && RS.main.paused)) ctx.resume(); } catch (e) { } });
     on('SIM_TICK', () => {
       const r = RS.sim && RS.sim.state && RS.sim.state.radar;
       if (!r) return;
@@ -259,7 +270,7 @@
               else meter = null; }                                              // old Safari: no float meter (debug only)
           }
         }
-        if (ctx && ctx.state === 'suspended') ctx.resume();
+        if (ctx && ctx.state === 'suspended' && !(RS.main && RS.main.paused)) ctx.resume();   // stay silent while paused
       } catch (e) { ctx = null; }
       if (ctx && !sfxBound && RS.sfx && RS.sfx.attach) {
         try {

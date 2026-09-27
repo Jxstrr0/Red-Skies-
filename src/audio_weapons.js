@@ -179,23 +179,36 @@
     return launchRail(p, w);
   }
   // Lance: gas generator throws the round out of the tube; cover ruptures; motor lights mid-air.
-  function thunk(o, t, k, f) {
-    tone(o, t, { f0: f, f1: f * 0.45, d: 0.22, peak: 0.9 * k, a: 0.002, type: 'triangle' });                 // hollow body
-    noise(o, t, { buf: 'brown', type: 'bandpass', f: 520, q: 1.1, d: 0.16, peak: 1.3 * k, a: 0.0015 });      // knock
-    noise(o, t, { buf: 'white', type: 'bandpass', f: 1500, q: 0.9, d: 0.05, peak: 0.6 * k, a: 0.0008 });     // hard edge
-    ring(o, t + 0.005, [230, 560, 1240], 0.5 * k, 0.05 * k);                                               // canister ring
+  // [V1.1.1] metallic "CLUNK": steel-on-steel strike = sharp click + knocked body + short inharmonic
+  // steel partials (detuned pairs beat → metallic shimmer) + a low thud. Ref clip (S-400 cold launch):
+  // two broadband hits 0.20 s apart, each ~60 ms of 150 Hz–4 kHz energy, ~-18 dB silence between them.
+  const STEEL = [1, 2.31, 3.83, 5.37, 7.09, 9.12];                     // thick steel tube / latch modes (inharmonic)
+  function clank(o, t, k, pitch) {
+    const b = 410 * pitch;
+    noise(o, t, { buf: 'white', type: 'highpass', f: 2800, d: 0.016, peak: 1.6 * k, a: 0.0004 });           // hard impact click
+    noise(o, t, { buf: 'white', type: 'bandpass', f: 1250 * pitch, q: 1.2, d: 0.07, peak: 2.4 * k, a: 0.0006 }); // metal knock (phone band)
+    noise(o, t, { buf: 'brown', type: 'bandpass', f: 380 * pitch, q: 1.0, d: 0.09, peak: 1.6 * k, a: 0.001 });   // body of the hit
+    tone(o, t, { f0: 150 * pitch, f1: 70, d: 0.12, peak: 0.9 * k, a: 0.0015 });                                 // low thud
+    STEEL.forEach((m, i) => {                                                                                  // steel ring, fast decay
+      const f = b * m, d = 0.26 / (1 + i * 0.55), pk = 0.26 * k / (1 + i * 0.3);
+      tone(o, t + 0.001, { f0: f, d, peak: pk, a: 0.0008, type: i < 2 ? 'triangle' : 'sine' });
+      tone(o, t + 0.001, { f0: f * 1.013, d: d * 0.8, peak: pk * 0.6, a: 0.0008 });
+    });
+    for (let i = 1; i <= 3; i++)                                                                               // latch chatter
+      noise(o, t + 0.018 * i + Math.random() * 0.006, { buf: 'white', type: 'bandpass', f: 2200 + i * 500, q: 3, d: 0.012, peak: 0.28 * k / i, a: 0.0005 });
   }
   function launchCold(p, w) {
-    const e = emitter(p, 60, 0.35), t = e.t, o = e.inp;
-    tone(o, t, { f0: 52, f1: 26, d: 0.55, peak: 1.2, a: 0.003 });                              // the "whump"
-    noise(o, t, { buf: 'brown', f: 260, d: 0.4, peak: 1.3, a: 0.002 });                        // gas slug
-    noise(o, t, { buf: 'white', type: 'highpass', f: 1800, d: 0.035, peak: 0.9, a: 0.0008 });  // cover rupture crack
-    noise(o, t, { buf: 'white', type: 'bandpass', f: 1300, q: 0.6, d: 0.12, peak: 0.5, a: 0.002 });           // [RS] mid 'bang' body (ref clip: centroid ~1.4 kHz)
-    noise(o, t + 0.12, { buf: 'white', type: 'highpass', f: 2600, d: 1.0, peak: 0.28, a: 0.08 });             // [RS] thin high gas hiss while the round is thrown
-    ring(o, t + 0.01, [212, 531, 1187, 2270], 1.3, 0.07);                                      // canister ring
+    const e = emitter(p, 60, 0.3), t = e.t, o = e.inp, ign = w.ignite || 0.85;
+    tone(o, t, { f0: 58, f1: 30, d: 0.28, peak: 0.6, a: 0.003 });                              // short gas "whump" under the first clunk
+    noise(o, t, { buf: 'brown', f: 300, d: 0.14, peak: 0.9, a: 0.002 });                       // gas slug (short: keeps the gap clean)
+    // "CLUNK — CLUNK": 1) gas charge fires / latches + cover go, 2) 0.20 s later the round clears the tube mouth
+    const pz = 1 / Math.sqrt(w.size || 1);                       // Dart's smaller canister rings a little higher
+    clank(o, t, 1.0, pz); clank(o, t + 0.2, 0.95, 1.14 * pz);
+    // rising hiss as the round hangs / the motor igniter spins up (ref: builds over the ~0.5 s before ignition)
+    noise(o, t + ign - 0.5, { buf: 'white', type: 'bandpass', f: 2600, f1: 4200, q: 0.5, d: 0.12, peak: 0.22, a: 0.5, curve: 'lin' });
     // motor ignition bang ~25 m above the launcher
     const up = { x: p.x, y: (p.y || 0) + 25, z: p.z };
-    const e2 = emitter(up, 90, 0.45), t2 = e2.t + (w.ignite || 0.85);
+    const e2 = emitter(up, 90, 0.45), t2 = e2.t + ign;
     noise(e2.inp, t2, { buf: 'white', f: 5000, d: 0.12, peak: 0.9, a: 0.001 });
     tone(e2.inp, t2, { f0: 70, f1: 35, d: 0.35, peak: 0.8, a: 0.002 });
     // [RS] phone-speaker layer: mid-band motor roar as the round climbs away (small speakers can't play the sub-bass above)
@@ -203,8 +216,6 @@
     noise(e2.inp, t2 + 0.02, { buf: 'pink', type: 'bandpass', f: 2000, f1: 800, q: 0.6, d: 4.5, peak: 1.5, a: 0.05 });
     noise(e2.inp, t2 + 0.02, { buf: 'crackle', type: 'highpass', f: 1200, d: 2.6, peak: 0.75, a: 0.04 });
     noise(e2.inp, t2, { buf: 'white', type: 'highpass', f: 3000, d: 1.1, peak: 0.5, a: 0.01 });
-    // [RS] "thunk-thunk": 1) gas charge fires / cover ruptures, 2) ~0.14 s later the round clears the tube mouth (phone-audible body + knock)
-    thunk(o, t, 1.0, 118); thunk(o, t + 0.2, 0.85, 142);   // ref clip 2: 0.20 s apart
     // cover fragments and grit landing around the launcher
     for (let i = 0; i < 6; i++) {
       const tt = t + 1.3 + Math.random() * 1.8;

@@ -2,22 +2,31 @@
    RED SKIES — scene.js   RS.scene : the view out of the shelter hatch.
    Reads state.visible / missiles / battery / radar / gun. Never reads tracks.
    API: init, resize, render, heightAt, launcherPos, listener, setEnv, shake, debug
+        v1.1: setEnv({time:'dawn'|'day'|'dusk'|'night', sky:'clear'|'overcast'|'rain', visKm?}) (+ old weather:'storm' alias);
+              SHIFT_START reads def.weather. follow(missileId|null) → boolean, following → id|null: watch-your-kill chase
+              camera (emits CAM_FOLLOW {id|null}); a far-ground plane follows the camera so there is ground out to ~110 km.
         title: setTitle(on), titleLaunch(id) → missileId, titleProbe(missileId), titleOn — cover-page cinematic (v19)
+        V1.3: eo = { state, setMode('TV'|'IR'|'AUTO'), toggleSwap(), swapped } — EO tracker camera inset (see the EO section);
+              debug.eo (internals: stats per pass, camera, render target)
    ===================================================================== */
 (function () {
   const RS = window.RS;
   const D2R = Math.PI / 180;
   const VIEW_BRG = 25;                       // hatch faces NNE (deg true)
-  const EYE = 1.3, PITCH = 10;
+  const EYE = 2.1;                           // V1.4: seated in the Pantsir cabin up on the truck (eye above the ground)
   const FAR_AIR = 4500;                      // aircraft beyond this (m) draw as a speck + contrail instead of a sub-pixel model
   const FAR_FX = 8000;                       // effects further than this are pulled in along the view ray (angular size kept)
   let REDUCED = false;
   try { REDUCED = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { /* ignore */ }
 
-  let renderer, scene, camera, models, shelter, time = 0, simT = -1, simAge = 0, lastState = null;
-  let hemi, sun, workLight, flashLight, skyMesh, skyGeo, stars, moon, rain, bolt, sunSpr, sunHalo;
+  let cab = null, cabScene = null, seatCam = null;   // V1.4 cabin (RS.cabin.model) in its own scene, drawn over the world
+  let renderer, scene, camera, models, shelter, time = 0, simT = -1, simAge = 0, lastState = null, terrainMesh = null;
+  let hemi, sun, workLight, flashLight, skyMesh, skyGeo, stars, moon, rain, bolt, sunSpr, sunHalo, skyGroup, terrainMat, farGround;
   let smoke, glow, flare, tracers, farSys;  // particle systems
-  const U = { scale: { value: 400 }, maxPx: { value: 256 }, fogColor: { value: new THREE.Color() }, fogNear: { value: 1000 }, fogFar: { value: 5000 } };
+  const U = { scale: { value: 400 }, maxPx: { value: 256 }, fogColor: { value: new THREE.Color() }, fogNear: { value: 1000 }, fogFar: { value: 5000 },
+    pass: { value: 0 }, ir: { value: 0 } };   // V1.3: pass 0 = hatch camera, 1 = EO tracker; ir 1 = thermal look for the EO pass
+  // V1.3 EO: particle layer for new spawns — 0 both cameras, 1 hatch only (pulled-in / speck stand-ins), 2 EO only (true place, true size)
+  let LAY = 0;
   const V3 = THREE.Vector3;
   const _v = new V3(), _w = new V3(), _q = new THREE.Quaternion(), _Z = new V3(0, 0, 1);
 
@@ -100,44 +109,65 @@
       }
     }
   }, 256);
-  // one dry-steppe tuft (alpha): tapered blades fanning from the base in straw / wheat / grey-beige, some feather-grass plumes.
-  // Built as a DataTexture whose transparent texels carry the average blade colour, so mipmaps don't grow dark fringes.
+  // V1.2.3 grass atlas: 2×2 tuft variants, 512² each (0 short turf, 1 tall feather grass, 2 seeded wheatgrass, 3 dry/broken).
+  // Blades are near-neutral (instance colour carries the hue); transparent texels carry the average colour (clean mips).
   const texTuft = () => {
-    const N = 256, c = document.createElement('canvas'); c.width = c.height = N;
+    const C = 512, N = C * 2, c = document.createElement('canvas'); c.width = c.height = N;
     const g = c.getContext('2d'), r = rng(77);
-    const PAL = [[232, 222, 196], [218, 206, 176], [202, 194, 170], [238, 232, 214], [188, 180, 154], [164, 162, 132]];   // near-neutral: the instance colour carries the hue
-    const blade = (bx, h, lean, w, col, curl) => {                    // filled, tapered, slightly curved blade
-      const tx = bx + lean, ty = N - h, mx = bx + lean * (0.25 + curl), my = N - h * 0.55;
-      const gr = g.createLinearGradient(0, N, 0, ty);
-      const [R, G, B] = col;
-      gr.addColorStop(0, `rgb(${R * 0.78 | 0},${G * 0.76 | 0},${B * 0.7 | 0})`); gr.addColorStop(0.5, `rgb(${R},${G},${B})`);
-      gr.addColorStop(1, `rgb(${Math.min(255, R * 1.08) | 0},${Math.min(255, G * 1.08) | 0},${Math.min(255, B * 1.1) | 0})`);
+    const PAL = [[226, 214, 184], [212, 200, 168], [196, 190, 164], [236, 230, 210], [182, 176, 150], [150, 156, 122], [170, 170, 140]];
+    const blade = (ox, oy, bx, h, lean, w, col, curl, fold) => {    // filled, tapered, curved blade; fold = tip droops past the bend
+      const base = oy + C, tx = ox + bx + lean, ty = base - h, mx = ox + bx + lean * (0.3 + curl), my = base - h * 0.58;
+      const [R, G, B] = col, gr = g.createLinearGradient(0, base, 0, ty);
+      gr.addColorStop(0, `rgb(${R * 0.68 | 0},${G * 0.68 | 0},${B * 0.6 | 0})`); gr.addColorStop(0.35, `rgb(${R * 0.9 | 0},${G * 0.9 | 0},${B * 0.86 | 0})`);
+      gr.addColorStop(0.8, `rgb(${R},${G},${B})`); gr.addColorStop(1, `rgb(${Math.min(255, R * 1.1) | 0},${Math.min(255, G * 1.08) | 0},${Math.min(255, B * 1.06) | 0})`);
       g.fillStyle = gr; g.beginPath();
-      g.moveTo(bx - w, N); g.quadraticCurveTo(mx - w * 0.6, my, tx, ty); g.quadraticCurveTo(mx + w * 0.6, my, bx + w, N); g.closePath(); g.fill();
+      g.moveTo(ox + bx - w, base); g.quadraticCurveTo(mx - w * 0.5, my, tx, ty); g.quadraticCurveTo(mx + w * 0.5, my, ox + bx + w, base); g.closePath(); g.fill();
+      g.strokeStyle = `rgba(${Math.min(255, R * 1.18) | 0},${Math.min(255, G * 1.15) | 0},${Math.min(255, B * 1.1) | 0},0.35)`; g.lineWidth = Math.max(0.6, w * 0.35);   // midrib highlight
+      g.beginPath(); g.moveTo(ox + bx, base - h * 0.08); g.quadraticCurveTo(mx, my, tx, ty); g.stroke();
+      if (fold) {                                                     // broken / drooping tip
+        const d = lean >= 0 ? 1 : -1, L = h * fold;
+        g.strokeStyle = `rgb(${R * 0.95 | 0},${G * 0.93 | 0},${B * 0.88 | 0})`; g.lineWidth = Math.max(0.8, w * 0.8); g.lineCap = 'round';
+        g.beginPath(); g.moveTo(tx, ty); g.quadraticCurveTo(tx + d * L * 0.7, ty - L * 0.1, tx + d * L, ty + L * 0.6); g.stroke();
+      }
       return [tx, ty];
     };
-    for (let i = 0; i < 70; i++) {
-      const back = i < 30;                                            // back layer: shorter, a bit darker (depth inside the tuft)
-      const bx = N * (0.3 + r() * 0.4), h = N * (back ? 0.4 + r() * 0.35 : 0.55 + r() * 0.43), lean = (r() - 0.5) * N * (0.25 + (h / N) * 0.35);
-      const base = PAL[(r() * PAL.length) | 0], k = back ? 0.84 : 1, col = base.map(v => v * k * (0.94 + r() * 0.12));
-      const [tx, ty] = blade(bx, h, lean, 0.9 + r() * 1.5, col, (r() - 0.5) * 0.3);
-      if (!back && r() < 0.22) {                                      // feather-grass plume: silky, pale, drooping from the tip
-        g.strokeStyle = 'rgba(244,238,220,0.85)'; g.lineCap = 'round'; g.lineWidth = 1.1;
-        const dir = lean >= 0 ? 1 : -1, L = N * (0.12 + r() * 0.1);
-        g.beginPath(); g.moveTo(tx, ty); g.quadraticCurveTo(tx + dir * L * 0.6, ty - L * 0.15, tx + dir * L, ty + L * 0.45); g.stroke();
-        g.lineWidth = 2.6; g.strokeStyle = 'rgba(244,238,220,0.28)'; g.stroke();
-      } else if (!back && r() < 0.18) {                               // seed head
-        g.fillStyle = 'rgb(214,190,132)'; g.save(); g.translate(tx, ty + 6); g.rotate(Math.atan2(lean, h) * 0.8);
-        g.beginPath(); g.ellipse(0, 0, 2.2, 8, 0, 0, 7); g.fill(); g.restore();
+    const plume = (tx, ty, dir, L) => {                               // feather-grass awn: long, silky, drooping
+      g.lineCap = 'round';
+      for (const [lw, a] of [[5, 0.12], [2.4, 0.3], [1.1, 0.9]]) {
+        g.strokeStyle = `rgba(246,242,228,${a})`; g.lineWidth = lw;
+        g.beginPath(); g.moveTo(tx, ty); g.bezierCurveTo(tx + dir * L * 0.35, ty - L * 0.25, tx + dir * L * 0.8, ty - L * 0.05, tx + dir * L, ty + L * 0.55); g.stroke();
       }
-    }
+    };
+    const head = (tx, ty, ang, len, col) => {                         // wheatgrass spike: stacked spikelets
+      g.save(); g.translate(tx, ty); g.rotate(ang);
+      for (let k = 0; k < 7; k++) { g.fillStyle = `rgb(${col[0] - k * 3},${col[1] - k * 4},${col[2] - k * 5})`; g.beginPath(); g.ellipse((k % 2 ? 2.2 : -2.2), k * len / 7, 2.6, len / 9, (k % 2 ? 0.35 : -0.35), 0, 7); g.fill(); }
+      g.restore();
+    };
+    const cell = (v, ox, oy) => {
+      const nB = [120, 80, 90, 60][v];
+      for (let i = 0; i < nB; i++) {
+        const back = i < nB * 0.42;
+        const hMul = v === 0 ? (back ? 0.28 + r() * 0.2 : 0.4 + r() * 0.34) : v === 1 ? (back ? 0.3 + r() * 0.25 : 0.5 + r() * 0.42) : v === 2 ? (back ? 0.32 + r() * 0.2 : 0.5 + r() * 0.38) : (back ? 0.2 + r() * 0.2 : 0.3 + r() * 0.4);
+        const h = C * hMul, bx = C * (0.26 + r() * 0.48), lean = (r() - 0.5) * C * (v === 3 ? 0.55 : 0.22 + hMul * 0.32);
+        let pc = PAL[(r() * PAL.length) | 0];
+        if (v === 0 && r() < 0.45) pc = PAL[5 + ((r() * 2) | 0)];       // turf keeps some grey-green at the base
+        if (v === 3) pc = r() < 0.6 ? [206, 196, 172] : [168, 160, 138];
+        const k = back ? 0.6 : 1, col = pc.map(x => x * k * (0.88 + r() * 0.2));
+        const w = ((v === 0 ? 1.4 : v === 3 ? 1.6 : 1.9) + r() * (v === 1 ? 1.4 : 2.2)) * 1.7;
+        const fold = (v === 3 && r() < 0.5) ? 0.2 + r() * 0.25 : (!back && r() < 0.08 ? 0.15 : 0);
+        const [tx, ty] = blade(ox, oy, bx, h, lean, w, col, (r() - 0.5) * 0.4, fold);
+        if (!back && v === 1 && r() < 0.42) plume(tx, ty, lean >= 0 ? 1 : -1, C * (0.14 + r() * 0.14));
+        if (!back && v === 2 && r() < 0.34) head(tx, ty + 2, Math.atan2(lean, h) * 0.9, 20 + r() * 16, [212 + (r() * 20 | 0), 188, 128]);
+        if (!back && v === 0 && r() < 0.05) head(tx, ty + 2, Math.atan2(lean, h), 10 + r() * 6, [200, 184, 130]);
+      }
+    };
+    for (let v = 0; v < 4; v++) cell(v, (v % 2) * C, (v < 2 ? 1 : 0) * C);   // canvas y is top-down: variants 0,1 on the lower half → DataTexture v 0..0.5
     const img = g.getImageData(0, 0, N, N).data, data = new Uint8Array(N * N * 4);
     let sr = 0, sg = 0, sb = 0, n = 0;
     for (let i = 0; i < img.length; i += 4) if (img[i + 3] > 200) { sr += img[i]; sg += img[i + 1]; sb += img[i + 2]; n++; }
     const avg = [sr / n, sg / n, sb / n];
     for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {       // DataTexture rows run bottom-up
-      const si = ((N - 1 - y) * N + x) * 4, di = (y * N + x) * 4, a = img[si + 3];
-      const k = a / 255;
+      const si = ((N - 1 - y) * N + x) * 4, di = (y * N + x) * 4, a = img[si + 3], k = a / 255;
       data[di] = img[si] * k + avg[0] * (1 - k); data[di + 1] = img[si + 1] * k + avg[1] * (1 - k); data[di + 2] = img[si + 2] * k + avg[2] * (1 - k); data[di + 3] = a;
     }
     const t = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
@@ -153,21 +183,23 @@
 
   /* ---------------- particle system: one Points draw per system, pooled ---------------- */
   const PVS = `
-    attribute float size; attribute float alpha; attribute vec3 pcol;
-    uniform float uScale, uMinPx, uMaxPx, uFogNear, uFogFar, uFogK;
+    attribute float size; attribute float alpha; attribute vec3 pcol; attribute float layer;
+    uniform float uScale, uMinPx, uMaxPx, uFogNear, uFogFar, uFogK, uPass;
     varying float vA; varying vec3 vC; varying float vF;
     #include <common>
     #include <logdepthbuf_pars_vertex>
     void main() {
       vec4 mv = modelViewMatrix * vec4(position, 1.0);
       float d = max(0.1, -mv.z);
-      gl_PointSize = clamp(max(size * uScale / d, uMinPx), 0.0, uMaxPx);
-      vA = alpha; vC = pcol; vF = uFogK * smoothstep(uFogNear, uFogFar, d);
+      float on = (layer < 0.5 || abs(layer - 1.0 - uPass) < 0.5) ? 1.0 : 0.0;   // layer 1: hatch pass only, 2: EO pass only
+      gl_PointSize = on * clamp(max(size * uScale / d, uMinPx), 0.0, uMaxPx);
+      vA = alpha * on; vC = pcol; vF = uFogK * smoothstep(uFogNear, uFogFar, d);
       gl_Position = projectionMatrix * mv;
       #include <logdepthbuf_vertex>
+      if (on < 0.5) gl_Position = vec4(0.0, 0.0, -2.0, 1.0);                  // outside the clip volume
     }`;
   const PFS = `
-    uniform sampler2D map; uniform vec3 uFogColor; uniform float uAdd;
+    uniform sampler2D map; uniform vec3 uFogColor; uniform float uAdd, uIR;
     varying float vA; varying vec3 vC; varying float vF;
     #include <logdepthbuf_pars_fragment>
     void main() {
@@ -175,24 +207,28 @@
       vec4 t = texture2D(map, gl_PointCoord);
       float a = t.a * vA;
       if (a < 0.004) discard;
-      vec3 c = uAdd > 0.5 ? vC * (1.0 - vF) : mix(vC, uFogColor, vF);
+      vec3 c = vC;
+      if (uIR > 0.5) c = uAdd > 0.5 ? vec3(min(1.0, 1.4 * max(c.r, max(c.g, c.b))))     // thermal: flames/flashes white-hot,
+        : vec3(0.2 + 0.22 * dot(c, vec3(0.3, 0.59, 0.11)));                             // smoke/contrails a dull grey
+      c = uAdd > 0.5 ? c * (1.0 - vF) : mix(c, uFogColor, vF);
       gl_FragColor = vec4(c, a);
     }`;
   let smokeLight = 0.85;                     // brightness of non-additive smoke for the current light (day 1, dusk .85, night .3)
+  const PS_ATTR = ['position', 'pcol', 'size', 'alpha', 'layer'];
   class PSys {
     constructor(cap, tex, additive, minPx, fogK, order) {
       this.cap = cap; this.n = 0; this.rr = 0; this.add = !!additive;
       const F = k => new Float32Array(cap * k);
-      this.P = F(3); this.C = F(3); this.S = F(1); this.A = F(1);
+      this.P = F(3); this.C = F(3); this.S = F(1); this.A = F(1); this.L = F(1);
       this.d = { vx: F(1), vy: F(1), vz: F(1), age: F(1), life: F(1), s0: F(1), s1: F(1), a0: F(1), drag: F(1), rise: F(1) };
       const g = this.geo = new THREE.BufferGeometry();
       const at = (a, k) => new THREE.BufferAttribute(a, k).setUsage(THREE.DynamicDrawUsage);
       g.setAttribute('position', at(this.P, 3)); g.setAttribute('pcol', at(this.C, 3));
-      g.setAttribute('size', at(this.S, 1)); g.setAttribute('alpha', at(this.A, 1));
+      g.setAttribute('size', at(this.S, 1)); g.setAttribute('alpha', at(this.A, 1)); g.setAttribute('layer', at(this.L, 1));
       g.setDrawRange(0, 0);
       const m = new THREE.ShaderMaterial({
         uniforms: { map: { value: tex }, uScale: U.scale, uMaxPx: U.maxPx, uMinPx: { value: minPx }, uFogColor: U.fogColor,
-          uFogNear: U.fogNear, uFogFar: U.fogFar, uFogK: { value: fogK }, uAdd: { value: additive ? 1 : 0 } },
+          uFogNear: U.fogNear, uFogFar: U.fogFar, uFogK: { value: fogK }, uAdd: { value: additive ? 1 : 0 }, uPass: U.pass, uIR: U.ir },
         vertexShader: PVS, fragmentShader: PFS, transparent: true, depthWrite: false,
         blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending
       });
@@ -210,13 +246,13 @@
       d.s0[i] = o.s0 * k; d.s1[i] = (o.s1 == null ? o.s0 : o.s1) * k; d.a0[i] = o.a0; d.drag[i] = o.drag || 0; d.rise[i] = o.rise || 0;
       const c = o.c, L = this.add ? 1 : smokeLight * (0.8 + Math.random() * 0.2);   // lit smoke: env light + per-puff shading (billows)
       this.C[i * 3] = ((c >> 16) & 255) / 255 * L; this.C[i * 3 + 1] = ((c >> 8) & 255) / 255 * L; this.C[i * 3 + 2] = (c & 255) / 255 * L;
-      this.S[i] = d.s0[i]; this.A[i] = o.a0;
+      this.S[i] = d.s0[i]; this.A[i] = o.a0; this.L[i] = LAY;
     }
     kill(i) {
       const j = --this.n, d = this.d;
       if (i === j) return;
       for (let k = 0; k < 3; k++) { this.P[i * 3 + k] = this.P[j * 3 + k]; this.C[i * 3 + k] = this.C[j * 3 + k]; }
-      this.S[i] = this.S[j]; this.A[i] = this.A[j];
+      this.S[i] = this.S[j]; this.A[i] = this.A[j]; this.L[i] = this.L[j];
       for (const key in d) d[key][i] = d[key][j];
     }
     update(dt) {
@@ -233,7 +269,7 @@
       }
       if (this.rr >= this.n) this.rr = 0;
       const g = this.geo; g.setDrawRange(0, this.n);
-      for (const k of ['position', 'pcol', 'size', 'alpha']) g.attributes[k].needsUpdate = true;
+      for (const k of PS_ATTR) g.attributes[k].needsUpdate = true;
     }
   }
   // particle presets
@@ -254,6 +290,7 @@
     grey: { life: 4, s0: 4, s1: 18, a0: 0.6, c: 0x6a6660, drag: 0.8, rise: 0.6 },
     column: { life: 26, s0: 30, s1: 190, a0: 0.55, c: 0x1c1b1a, drag: 0.02, rise: 1.0 },
     fire: { life: 0.9, s0: 7, s1: 16, a0: 0.9, c: 0xff7a26, drag: 1.5, rise: 3 },
+    vapor: { life: 0.45, s0: 1.2, s1: 7, a0: 0.5, c: 0xffffff, drag: 3 },          // V1.2.2 condensation on hard pulls
     ember: { life: 0.5, s0: 2.5, s1: 4, a0: 0.9, c: 0xff9a40, drag: 0.5 },
     flash: { life: 0.5, s0: 50, s1: 150, a0: 1, c: 0xfff1d6 },
     ball: { life: 1.6, s0: 18, s1: 50, a0: 0.95, c: 0xff8a2a, drag: 1.2, rise: 4 },
@@ -262,13 +299,22 @@
     dot: { life: 0.001, s0: 0, a0: 0.9, c: 0x111214 },
     motor: { life: 0.001, s0: 2.2, a0: 1, c: 0xffd9a0 },
     navR: { life: 0.001, s0: 0.8, a0: 1, c: 0xff3020 }, navG: { life: 0.001, s0: 0.8, a0: 1, c: 0x30ff60 },
-    navW: { life: 0.001, s0: 1.2, a0: 1, c: 0xffffff }, work: { life: 0.001, s0: 1.4, a0: 0.9, c: 0xffe2a8 }
+    navW: { life: 0.001, s0: 1.2, a0: 1, c: 0xffffff }, work: { life: 0.001, s0: 1.4, a0: 0.9, c: 0xffe2a8 },
+    heat: { life: 0.001, s0: 2.6, a0: 0.9, c: 0xfff0e0 }                              // V1.3 EO/IR: engine exhaust hot spot
   };
   // world position for an effect at sim (x km, y km, alt m); far ones are pulled in to FAR_FX along the ray
   function fxPos(px, py, pz) {
     const c = camera.position; _v.set(px - c.x, py - c.y, pz - c.z);
     const d = _v.length(), k = d > FAR_FX ? FAR_FX / d : 1;
     return { x: c.x + _v.x * k, y: c.y + _v.y * k, z: c.z + _v.z * k, k, d };
+  }
+  // V1.3 EO: a far effect the tracker is looking at is spawned twice — pulled in for the hatch (layer 1) and at its true
+  // place / true size for the EO camera (layer 2). fn(q) spawns the effect at q. Events only (allocates).
+  function fxAt(px, py, pz, fn) {
+    const q = fxPos(px, py, pz);
+    if (q.k < 1 && eoSees(px, py, pz)) { LAY = 1; fn(q); LAY = 2; fn({ x: px, y: py, z: pz, k: 1, d: q.d }); LAY = 0; }
+    else fn(q);
+    return q;
   }
   function burst(sys, p, o, n, spd, k) {
     for (let i = 0; i < n; i++) {
@@ -312,23 +358,61 @@
     for (let i = 0; i < pos.count; i++) {
       const x = pos.getX(i), z = pos.getZ(i), h = heightAt(x, z);
       pos.setY(i, h);
-      const t = clamp(h / 260, 0, 1), pad = 1 - sstep(60, 240, Math.hypot(x, z));
-      // summer steppe: straw-gold fields with greener hollows (macro patches from the same value noise as the hills)
-      const patch = vnoise(x / 420 + 11, z / 420 - 7), dry = sstep(0.35, 0.65, patch);
-      c.setRGB(0.28 + 0.14 * dry + 0.10 * t, 0.29 + 0.08 * dry + 0.04 * t, 0.15 + 0.04 * dry + 0.08 * t);
-      c.offsetHSL(0, 0, (hash(i, 7) - 0.5) * 0.04);
-      c.lerp(new THREE.Color(0.27, 0.26, 0.19), pad * 0.5);                // trampled/gravel battery pad
+      // summer steppe: straw-gold fields with greener hollows; trampled/gravel battery pad at the centre
+      groundCol(c, x, z, h, 1 - sstep(60, 240, Math.hypot(x, z)), (hash(i, 7) - 0.5) * 0.04);
       cols[i * 3] = c.r; cols[i * 3 + 1] = c.g; cols[i * 3 + 2] = c.b;
     }
     geo.setAttribute('color', new THREE.BufferAttribute(cols, 3));
     geo.computeVertexNormals();
     const det = texGround(); det.wrapS = det.wrapT = THREE.RepeatWrapping; det.repeat.set(size / 9, size / 9);
     det.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy ? renderer.capabilities.getMaxAnisotropy() : 1);
-    scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, map: det })));
+    terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true, map: det }); eoClip(terrainMat);
+    terrainMesh = new THREE.Mesh(geo, terrainMat); scene.add(terrainMesh);
   }
-  /* ---------------- grass: instanced crossed-quad tufts in the hatch's view, swaying in the wind ---------------- */
-  const grassU = { uTime: { value: 0 }, uWind: { value: 1 }, uSun: { value: new THREE.Color(0, 0, 0) } };
-  let grassGust = 0, grassMesh = null, grassFull = 0;
+  // steppe colour at (x,z) — shared by the near terrain and the far ground (pad = battery-pad blend 0..1)
+  function groundCol(c, x, z, h, pad, jitter) {
+    const t = clamp(h / 260, 0, 1), patch = vnoise(x / 420 + 11, z / 420 - 7), dry = sstep(0.35, 0.65, patch);
+    c.setRGB(0.28 + 0.14 * dry + 0.10 * t, 0.29 + 0.08 * dry + 0.04 * t, 0.15 + 0.04 * dry + 0.08 * t);
+    if (jitter) c.offsetHSL(0, 0, jitter);
+    if (pad > 0) c.lerp(PAD_COL, pad * 0.5);
+    return c;
+  }
+  const PAD_COL = new THREE.Color(0.27, 0.26, 0.19);
+  /* ---------------- far ground: a coarse terrain sheet (45 km, 900 m cells) that re-centres under the camera.
+     Inside the near-terrain square it sinks out of sight; outside it carries the same hills + colours (the detail
+     texture's average is baked in). Rebuilt only when the camera crosses a cell (~1k heightAt calls). ---------------- */
+  const FG_CELL = 900, FG_N = 50, NEAR_HALF = 4500;
+  function buildFarGround() {
+    const geo = new THREE.PlaneGeometry(FG_CELL * FG_N, FG_CELL * FG_N, FG_N, FG_N);
+    geo.rotateX(-Math.PI / 2);
+    geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(geo.attributes.position.count * 3), 3));
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true }); eoClip(mat);
+    const mesh = new THREE.Mesh(geo, mat); mesh.frustumCulled = false; mesh.renderOrder = -0.5;
+    scene.add(mesh);
+    farGround = { mesh, geo, mat, base: geo.attributes.position.array.slice(), cx: NaN, cz: NaN };
+    updateFarGround(0, 0);
+  }
+  const _fc = new THREE.Color();
+  function updateFarGround(x, z) {
+    const F = farGround, cx = Math.round(x / FG_CELL) * FG_CELL, cz = Math.round(z / FG_CELL) * FG_CELL;
+    if (cx === F.cx && cz === F.cz) return;
+    F.cx = cx; F.cz = cz; F.mesh.position.set(cx, 0, cz);
+    const pos = F.geo.attributes.position, col = F.geo.attributes.color, B = F.base;
+    for (let i = 0; i < pos.count; i++) {
+      const wx = B[i * 3] + cx, wz = B[i * 3 + 2] + cz, h = heightAt(wx, wz);
+      const inside = Math.abs(wx) < NEAR_HALF && Math.abs(wz) < NEAR_HALF;
+      pos.setY(i, inside ? h - 160 : h);
+      groundCol(_fc, wx, wz, h, 0, 0);
+      col.setXYZ(i, _fc.r * 0.83, _fc.g * 0.8, _fc.b * 0.7);          // × the ground texture's average tint
+    }
+    pos.needsUpdate = true; col.needsUpdate = true; F.geo.computeVertexNormals();
+  }
+  /* ---------------- grass (V1.2.3): two instanced layers of steppe tufts in the hatch's view, swaying in the wind ----------------
+     near: 3 crossed quads × 3 height segments (blades bend in a smooth curve), 4 atlas variants; mid/far: 2 crossed quads.
+     Shading: base AO, per-instance hue, gust sheen, translucent tips when looking into a low sun. */
+  const grassU = { uTime: { value: 0 }, uWind: { value: 1 }, uSun: { value: new THREE.Color(0, 0, 0) }, uSunDir: { value: new V3(0, 1, 0) } };
+  let grassGust = 0, grassMesh = null, grassFull = 0, grassTitle = null;
+  const grassLayers = [];                                             // [{ mesh, full }]
   // auto-quality: if frames run slow for ~3 s, thin the grass, then lower the render resolution (phones differ a lot)
   const perf = { acc: 0, n: 0, level: 0 };
   function autoQuality(rawDt) {
@@ -338,80 +422,113 @@
     const avg = perf.acc / perf.n; perf.acc = 0; perf.n = 0;
     if (avg < 1 / 40) return;                                        // ≥ 40 fps: keep full quality
     perf.level++;
-    if (perf.level === 1 && grassMesh) grassMesh.count = Math.round(grassFull * 0.55);
-    else if (perf.level === 2 && grassMesh) grassMesh.count = Math.round(grassFull * 0.3);
+    if (perf.level <= 2) for (const L of grassLayers) L.mesh.count = Math.round(L.full * (perf.level === 1 ? 0.55 : 0.3));
     else if (perf.level === 3) { renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.1)); api.resize(renderer.domElement.clientWidth, renderer.domElement.clientHeight); }
   }
-  function buildGrass() {
-    const tex = texTuft(); tex.anisotropy = 4;
+  function tuftGeo(quads, segs) {
     // crossed quads, 1 m wide × 1 m tall, base at y = 0; normals point up so tufts light like the ground
     const P = [], U = [], I = [];
-    for (let k = 0; k < 2; k++) {                                   // 2 crossed quads (less overdraw than 3 on phone GPUs)
-      const a = k * Math.PI / 2, cx = Math.cos(a) * 0.5, cz = Math.sin(a) * 0.5, b = P.length / 3;
-      P.push(-cx, 0, -cz, cx, 0, cz, cx, 1, cz, -cx, 1, -cz); U.push(0, 0, 1, 0, 1, 1, 0, 1);
-      I.push(b, b + 1, b + 2, b, b + 2, b + 3);
+    for (let k = 0; k < quads; k++) {
+      const a = k * Math.PI / quads + 0.3, cx = Math.cos(a) * 0.5, cz = Math.sin(a) * 0.5, b = P.length / 3;
+      for (let j = 0; j <= segs; j++) { const y = j / segs; P.push(-cx, y, -cz, cx, y, cz); U.push(0, y, 1, y); }
+      for (let j = 0; j < segs; j++) { const o = b + j * 2; I.push(o, o + 1, o + 3, o, o + 3, o + 2); }
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
     geo.setAttribute('normal', new THREE.Float32BufferAttribute(P.map((v, i) => (i % 3 === 1 ? 1 : 0)), 3));
     geo.setAttribute('uv', new THREE.Float32BufferAttribute(U, 2)); geo.setIndex(I);
-    const mat = new THREE.MeshLambertMaterial({ map: tex, alphaTest: 0.36, side: THREE.DoubleSide });
-    // (alphaToCoverage left off: costly on mobile GPUs)
+    return geo;
+  }
+  function grassMat(tex) {
+    const mat = new THREE.MeshLambertMaterial({ map: tex, alphaTest: 0.4, side: THREE.DoubleSide });
     mat.onBeforeCompile = sh => {
-      sh.uniforms.uTime = grassU.uTime; sh.uniforms.uWind = grassU.uWind; sh.uniforms.uSun = grassU.uSun;
-      sh.vertexShader = 'uniform float uTime; uniform float uWind; varying float vBend;\n' + sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+      Object.assign(sh.uniforms, { uTime: grassU.uTime, uWind: grassU.uWind, uSun: grassU.uSun, uSunDir: grassU.uSunDir });
+      sh.vertexShader = 'uniform float uTime; uniform float uWind; uniform vec3 uSunDir; attribute float aVar; varying float vBend; varying float vGy; varying float vBack;\n' + sh.vertexShader
+        .replace('#include <uv_vertex>', `#include <uv_vertex>
+        vUv = uv * 0.5 + vec2(mod(aVar, 2.0), step(1.5, aVar)) * 0.5;      // atlas cell
+        vGy = uv.y;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
         float gh = max(position.y, 0.0);
         vec4 gp = instanceMatrix[3];
         float ph = uTime * 1.7 + gp.x * 0.09 + gp.z * 0.06;
-        // travelling gust bands roll across the field (the silvery waves you see on real steppe grass)
+        // travelling gust bands roll across the field (the silvery waves on real steppe grass) + a slower broad swell
         float wave = sin(dot(gp.xz, vec2(0.052, 0.031)) - uTime * 1.35) * 0.5 + 0.5;
-        wave = wave * wave * wave;
-        float sw = (sin(ph) * 0.45 + sin(ph * 2.3 + 1.7) * 0.15 + 0.3 + wave * 0.9) * uWind;
-        transformed.x += sw * gh * gh * 0.32; transformed.z += sw * gh * gh * 0.18;
-        transformed.y -= abs(sw) * gh * gh * 0.06;
-        vBend = wave * min(uWind, 1.6);`);
+        float swell = sin(dot(gp.xz, vec2(0.011, -0.017)) - uTime * 0.4) * 0.5 + 0.5;
+        wave = wave * wave * wave * (0.6 + 0.6 * swell);
+        float sw = (sin(ph) * 0.4 + sin(ph * 2.3 + 1.7) * 0.14 + sin(ph * 5.1 + position.x * 7.0) * 0.05 + 0.3 + wave * 0.95) * uWind;
+        float bend = gh * gh;
+        transformed.x += sw * bend * 0.34; transformed.z += sw * bend * 0.19;
+        transformed.y -= abs(sw) * bend * 0.08;
+        transformed.xz += position.xz * bend * (0.18 + 0.1 * step(0.5, aVar) * step(aVar, 1.5));   // blades fan out as they rise
+        vBend = wave * min(uWind, 1.6);
+        vec3 wpos = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
+        vBack = pow(max(dot(normalize(wpos - cameraPosition), uSunDir), 0.0), 3.0);`);
       // back faces of the crossed quads must light like the front (Lambert would light them from below → black specks)
-      sh.fragmentShader = 'uniform vec3 uSun; varying float vBend;\n' + sh.fragmentShader.replace(/:\s*vLightBack\s*;/g, ': vLightFront;').replace(/:\s*vIndirectBack\s*;/g, ': vIndirectFront;')
+      sh.fragmentShader = 'uniform vec3 uSun; varying float vBend; varying float vGy; varying float vBack;\n' + sh.fragmentShader
+        .replace(/:\s*vLightBack\s*;/g, ': vLightFront;').replace(/:\s*vIndirectBack\s*;/g, ': vIndirectFront;')
         .replace('#include <map_fragment>', `#include <map_fragment>
-          diffuseColor.rgb *= mix(0.42, 1.12, smoothstep(0.0, 0.85, vUv.y));   // self-shadow inside the tuft
-          diffuseColor.rgb *= 1.0 + 0.16 * vBend * vUv.y;                     // bent blades show their pale undersides`)
-        .replace('#include <output_fragment>', `outgoingLight += uSun * diffuseColor.rgb * (0.34 * vUv.y * vUv.y);   // low sun glowing through the tips
+          diffuseColor.rgb *= mix(0.4, 1.08, smoothstep(0.0, 0.8, vGy));       // ambient occlusion deep in the tuft
+          diffuseColor.rgb *= 1.0 + 0.2 * vBend * vGy;                            // bent blades flash their pale undersides
+          float gEdge = 1.0 - smoothstep(0.42, 0.95, diffuseColor.a);             // blade edges / thin tips (partial alpha)`)
+        .replace('#include <output_fragment>', `outgoingLight += uSun * (diffuseColor.rgb * (0.3 * vGy * vGy + 1.6 * vBack * vGy) + vec3(0.6, 0.46, 0.3) * vBack * gEdge * vGy * 2.4);   // low sun through the tips, rim-lit blade edges
           #include <output_fragment>`);
     };
-    const keep = [];
-    const r = rng(4242), N_NEAR = 4600, N_FAR = 7400, N = N_NEAR + N_FAR;
+    return mat;
+  }
+  function buildGrass() {
+    const tex = texTuft(); tex.anisotropy = 8;
     const clear = [['L1', 15], ['L2', 15], ['L3', 12], ['G1', 8], ['RADAR', 13], ['FC', 11], ['LA', 8], ['CP', 10], ['GEN', 6]];
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new V3(), pp = new V3(), col = new THREE.Color(), Y = new V3(0, 1, 0);
-    const straw = new THREE.Color(0xe2c992), olive = new THREE.Color(0x9a9262), dryg = new THREE.Color(0xcbb282), grey = new THREE.Color(0xb0aa98);
-    const mesh = new THREE.InstancedMesh(geo, mat, N);
-    let n = 0;
-    for (let i = 0; i < N * 4 && n < N; i++) {
-      const near = n < N_NEAR;
-      const b = VIEW_BRG + (r() - 0.5) * (near ? 76 : 88), d = near ? 4.5 + Math.pow(r(), 1.2) * 26 : 30 + Math.pow(r(), 1.6) * 240;
-      const [dx, dz] = dirOf(b), x = dx * d, z = dz * d;
-      if (clear.some(([id, rad]) => Math.hypot(x - LAYOUT[id].x, z - LAYOUT[id].z) < rad)) continue;
-      const clump = vnoise(x / 7 + 3, z / 7 - 5);                     // grass grows in clumps with thinner ground between
-      if (r() > (near ? 0.12 : 0.3) + sstep(0.25, 0.75, clump) * 1.1) continue;
-      const close = sstep(12, 5, d);                                  // the nearest tufts are bigger so single blades read
-      const h = (0.24 + r() * 0.3 + clump * 0.22) * (d > 60 ? 1.35 : 1) * (1 + close * 0.35), w = (0.6 + r() * 0.6 + (d > 60 ? 0.5 : 0)) * (1 + close * 0.3);   // knee-high steppe grass (keeps vehicle wheels readable)
-      q.setFromAxisAngle(Y, r() * 6.283);
-      m.compose(pp.set(x, heightAt(x, z) - 0.05, z), q, sc.set(w, h, w));
-      mesh.setMatrixAt(n, m);
-      const dry = vnoise(x / 60, z / 60), fine = vnoise(x / 11 - 9, z / 11 + 4);
-      col.copy(olive).lerp(straw, 0.3 + 0.7 * sstep(0.25, 0.7, dry)).lerp(dryg, fine * 0.6).multiplyScalar(0.7 + clump * 0.22 + r() * 0.1);
-      if (r() < 0.06) col.lerp(grey, 0.6);                          // the odd bleached, grey dead tuft
-      mesh.setColorAt(n, col);
-      n++;
-    }
-    mesh.count = n; mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
-    mesh.frustumCulled = false; scene.add(mesh);
-    grassMesh = mesh; grassFull = n;
+    const straw = new THREE.Color(0xd9c38f), pale = new THREE.Color(0xe6dcc0), olive = new THREE.Color(0x8e8c5c), sage = new THREE.Color(0x8d9272),
+      dryg = new THREE.Color(0xc2ab7c), grey = new THREE.Color(0xaaa594), rust = new THREE.Color(0xb68f5f);
+    const layer = (N, geo, near, seed, o) => {
+      o = o || { ox: 0, oz: 0, brg: VIEW_BRG, spread: near ? 80 : 92, d0: near ? 3.2 : 30, d1: near ? 30 : 300, pw: near ? 1.35 : 1.7 };
+      const r = rng(seed), mesh = new THREE.InstancedMesh(geo, grassMat(tex), N), aVar = new Float32Array(N);
+      let n = 0;
+      for (let i = 0; i < N * 5 && n < N; i++) {
+        const b = o.brg + (r() - 0.5) * o.spread, d = o.d0 + Math.pow(r(), o.pw) * o.d1;
+        const [dx, dz] = dirOf(b), x = o.ox + dx * d, z = o.oz + dz * d;
+        if (o.ox && Math.hypot(x, z) < 26) continue;                  // title layer: leave the battery pad to the main layers
+        if (clear.some(([id, rad]) => Math.hypot(x - LAYOUT[id].x, z - LAYOUT[id].z) < rad)) continue;
+        const clump = vnoise(x / 6 + 3, z / 6 - 5), patch = vnoise(x / 23 - 7, z / 23 + 2), dry = vnoise(x / 38, z / 38) * 0.7 + vnoise(x / 110 + 5, z / 110) * 0.3, fine = vnoise(x / 9 - 9, z / 9 + 4);
+        if (r() > (near ? 0.04 : 0.22) + sstep(0.35, 0.8, clump) * 1.05) continue;   // clumps with thin, bare-ish ground between
+        // variant: turf everywhere, feather grass in patches, wheatgrass on the drier ground, the odd dead tuft
+        const u = r();
+        const v = u < 0.07 ? 3 : patch > 0.62 && u < 0.55 ? 1 : dry > 0.55 && u < 0.5 ? 2 : u < 0.62 ? 0 : patch > 0.45 ? 1 : 2;
+        const close = sstep(10, 4, d) * (o.ox ? 0.4 : 1);                                // the nearest tufts are bigger so single blades read
+        const hv = [0.3, 0.62, 0.5, 0.3][v], wv = [0.9, 0.95, 0.85, 0.8][v];
+        const h = hv * (0.7 + r() * 0.55 + clump * 0.3) * (d > 60 ? 1.1 : 1) * (1 + close * 0.3);
+        const w = wv * (0.65 + r() * 0.5 + (d > 60 ? 0.35 : 0)) * (1 + close * 0.25);
+        q.setFromAxisAngle(Y, r() * 6.283);
+        m.compose(pp.set(x, heightAt(x, z) - 0.04, z), q, sc.set(w, h, w));
+        mesh.setMatrixAt(n, m); aVar[n] = v;
+        col.copy(olive).lerp(sage, sstep(0.3, 0.7, patch) * 0.6).lerp(straw, 0.05 + 0.75 * sstep(0.3, 0.7, dry)).lerp(dryg, fine * 0.35);
+        if (v === 1) col.lerp(pale, 0.35);
+        if (v === 2) col.lerp(rust, 0.18 * r());
+        if (v === 3) col.lerp(grey, 0.65);
+        col.multiplyScalar(0.46 + clump * 0.26 + r() * 0.16);
+        mesh.setColorAt(n, col);
+        n++;
+      }
+      geo.setAttribute('aVar', new THREE.InstancedBufferAttribute(aVar, 1));
+      mesh.count = n; mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.frustumCulled = false; scene.add(mesh);
+      grassLayers.push({ mesh, full: n });
+      return mesh;
+    };
+    grassMesh = layer(11000, tuftGeo(3, 3), true, 4242);
+    layer(15000, tuftGeo(2, 1), false, 777);
+    // cover page: the camera sits low in the grass SW of the site looking NNE into the sun → backlit foreground tufts
+    grassTitle = layer(6500, tuftGeo(3, 3), true, 99, { ox: TCAM.x, oz: TCAM.z, brg: TCAM.brg, spread: 110, d0: 1.4, d1: 60, pw: 1.6 });
+    grassTitle.visible = !!title.on;
+    grassFull = grassLayers.reduce((a, L) => a + L.full, 0);
   }
   function buildSky() {
     skyGeo = new THREE.SphereGeometry(9500, 24, 12);
     skyGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(skyGeo.attributes.position.count * 3), 3));
     skyMesh = new THREE.Mesh(skyGeo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false }));
-    skyMesh.renderOrder = -1; scene.add(skyMesh);
+    skyMesh.renderOrder = -1;
+    skyGroup = new THREE.Group(); skyGroup.add(skyMesh); scene.add(skyGroup);   // sky, stars, moon, sun ride with the camera (chase cam)
     // stars
     const r = rng(99), N = 700, P = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) {
@@ -420,7 +537,7 @@
     }
     const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.BufferAttribute(P, 3));
     stars = new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xcfd8ff, size: 1.6, sizeAttenuation: false, fog: false, depthWrite: false, transparent: true, opacity: 0.85 }));
-    stars.frustumCulled = false; scene.add(stars);
+    stars.frustumCulled = false; skyGroup.add(stars);
     // moon (disc sprite), bearing 48°, 22° up
     moon = new THREE.Sprite(new THREE.SpriteMaterial({ map: canvasTex((g, N) => {
       const gr = g.createRadialGradient(N / 2, N / 2, N * 0.2, N / 2, N / 2, N / 2);
@@ -429,7 +546,7 @@
       g.fillStyle = 'rgba(150,160,180,0.35)'; [[0.42, 0.44, 0.07], [0.58, 0.55, 0.05], [0.5, 0.6, 0.04]].forEach(([x, y, rr]) => { g.beginPath(); g.arc(x * N, y * N, rr * N, 0, 7); g.fill(); });
     }, 128), fog: false, depthWrite: false, transparent: true }));
     const [mx, mz] = dirOf(48); moon.position.set(mx * 8500 * 0.93, 8500 * 0.37, mz * 8500 * 0.93); moon.scale.setScalar(320);
-    scene.add(moon);
+    skyGroup.add(moon);
     // [v19] title sun: a low, swollen disc + wide halo (only shown on the cover page)
     const sunTex = canvasTex((g, N) => {
       const gr = g.createRadialGradient(N / 2, N / 2, 0, N / 2, N / 2, N / 2);
@@ -438,14 +555,50 @@
       g.fillStyle = gr; g.fillRect(0, 0, N, N);
     }, 256);
     sunSpr = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex, fog: false, depthWrite: false, transparent: true, blending: THREE.AdditiveBlending }));
-    sunSpr.scale.setScalar(900); sunSpr.visible = false; sunSpr.renderOrder = 0; scene.add(sunSpr);
+    sunSpr.scale.setScalar(900); sunSpr.visible = false; sunSpr.renderOrder = 0; skyGroup.add(sunSpr);
     const haloTex = canvasTex((g, N) => {
       const gr = g.createRadialGradient(N / 2, N / 2, 0, N / 2, N / 2, N / 2);
       gr.addColorStop(0, 'rgba(255,120,60,0.55)'); gr.addColorStop(0.4, 'rgba(230,70,40,0.18)'); gr.addColorStop(1, 'rgba(200,40,30,0)');
       g.fillStyle = gr; g.fillRect(0, 0, N, N);
     }, 128);
     sunHalo = new THREE.Sprite(new THREE.SpriteMaterial({ map: haloTex, fog: false, depthWrite: false, transparent: true, blending: THREE.AdditiveBlending }));
-    sunHalo.scale.setScalar(5200); sunHalo.visible = false; scene.add(sunHalo);
+    sunHalo.scale.setScalar(5200); sunHalo.visible = false; skyGroup.add(sunHalo);
+  }
+  /* v1.1 overcast / rain: a stratus deck — a big disc CLOUD_H above the camera with tileable fbm lumps, world-anchored (the
+     texture offset follows the camera so the chase view flies under it), drifting with the wind. Drawn right after the sky with
+     no depth write, so aircraft above it stay visible (gameplay); fog melts it into the horizon haze. */
+  const CLOUD_H = 1500, CLOUD_TILE = 4200, CLOUD_R = 28000;
+  let cloudDeck = null;
+  function buildCloudDeck() {
+    const tex = canvasTex((g, N) => {
+      const img = g.createImageData(N, N), d = img.data;
+      const tv = (x, y, P, s) => {                 // tileable value noise, period P lattice cells
+        const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi, u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+        const h = (a, b) => hash(((a % P) + P) % P + (((b % P) + P) % P) * 131, s);
+        const a0 = h(xi, yi) + (h(xi + 1, yi) - h(xi, yi)) * u, a1 = h(xi, yi + 1) + (h(xi + 1, yi + 1) - h(xi, yi + 1)) * u;
+        return a0 + (a1 - a0) * v;
+      };
+      for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+        let n = 0, amp = 0.5, P = 4;
+        for (let o = 0; o < 5; o++, amp *= 0.5, P *= 2) n += amp * tv(x / N * P, y / N * P, P, 17 + o * 7);
+        const k = 0.66 + 0.34 * sstep(0.3, 0.72, n / 0.97), i = (y * N + x) * 4;   // dark bases, paler gaps between the lumps
+        d[i] = d[i + 1] = d[i + 2] = Math.round(k * 255); d[i + 3] = 255;
+      }
+      g.putImageData(img, 0, 0);
+    }, 256);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(CLOUD_R * 2 / CLOUD_TILE, CLOUD_R * 2 / CLOUD_TILE);
+    tex.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+    const geo = new THREE.CircleGeometry(CLOUD_R, 40); geo.rotateX(Math.PI / 2);   // faces down
+    cloudDeck = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ map: tex, depthWrite: false, side: THREE.DoubleSide }));
+    cloudDeck.renderOrder = -0.9; cloudDeck.frustumCulled = false; cloudDeck.visible = false;
+    scene.add(cloudDeck);
+  }
+  function updateCloudDeck(dt) {
+    if (!cloudDeck || !cloudDeck.visible) return;
+    const c = camera.position, T = cloudDeck.material.map;
+    cloudDeck.position.set(c.x, Math.max(CLOUD_H, c.y + CLOUD_H), c.z);
+    cloudDeck.userData.drift = (cloudDeck.userData.drift || 0) + dt * (env.cur && env.cur.storm ? 14 : 6);   // m/s of wind
+    T.offset.set(((c.x + cloudDeck.userData.drift) / CLOUD_TILE) % 1, ((c.z + cloudDeck.userData.drift * 0.4) / CLOUD_TILE) % 1);
   }
   function buildTrees(n) {
     const proto = models.create('tree', { placeholder: true });
@@ -464,7 +617,7 @@
       const im = new THREE.InstancedMesh(o.geometry, o.material, n);
       for (let i = 0; i < n; i++) im.setMatrixAt(i, m.multiplyMatrices(mats[i], o.matrixWorld));
       im.instanceMatrix.needsUpdate = true;
-      scene.add(im);
+      scene.add(im); eoHide.push(im);              // V1.3: the EO pass skips them (they'd float over its LOS-lowered terrain)
     });
   }
   function buildRain() {
@@ -676,6 +829,7 @@
       burst(smoke, { x: P.x, y: P.y, z: P.z, k: 1 }, FX.grey, 10, 8);
     }
   }
+  const _m1 = new THREE.Vector3(), _m2 = new THREE.Vector3(), _m3 = new THREE.Vector3(), _q1 = new THREE.Quaternion(), _q2 = new THREE.Quaternion(), _e1 = new THREE.Euler();
   function updateFlight(f, v, dt) {
     f.age += dt;
     if (v) {
@@ -694,6 +848,8 @@
       f.pos.lerp(pred, Math.max(k, f.blend >= 1 ? 0.35 : 0));
       if (f.simV.lengthSq() > 1) f.vel.lerp(f.simV, 1 - Math.exp(-6 * dt));
       f.lostT = 0;
+      // V1.2.1: never below the terrain (sim altitudes are above sea level; the hills here reach ~250 m)
+      if (f.age > 1.2) { const gy = heightAt(f.pos.x, f.pos.z) + 12; if (f.pos.y < gy) { f.pos.y = gy; if (f.vel.y < 0) f.vel.y *= 0.2; } }
     } else if (f.aim) {                      // [v19] cover-page round: steer at its fake target, burst on arrival
       const tg = title.ents.find(e => e.id === f.aim);
       if (!tg || f.age > 16) { endFlight(f.id, true); return; }
@@ -713,25 +869,61 @@
       if (f.m.userData.setMotor && f.lostT > lim - 0.5) f.m.userData.setMotor(false);
       f.m.scale.setScalar(Math.max(0.01, s));
     }
-    f.m.position.copy(f.pos);
-    if (f.vel.lengthSq() > 1) f.m.quaternion.setFromUnitVectors(_Z, _v.copy(f.vel).normalize());
+    // V1.2.2 maneuvering: the body leads the velocity into a turn (angle of attack), lags a touch, banks with the
+    // turn and hunts slightly (guidance jitter). Hard pulls (sim m.g) throw off vapour.
+    if (v && typeof v.g === 'number') f.g = v.g;
+    const guided = f.followed && f.age > 1.6;
+    if (guided) {                                   // guidance jitter: small lateral wander (visible in the follow cam)
+      if (f.jit === undefined) f.jit = Math.random() * 100;
+      const jt = time * 2.3 + f.jit, amp = 1.4 + Math.min(2, (f.g || 0) * 0.05);
+      _m1.set(Math.sin(jt) + 0.5 * Math.sin(jt * 2.7 + 1.3), 0.6 * Math.sin(jt * 1.9 + 2.1), 0);
+      f.m.position.copy(f.pos).addScaledVector(_m1.applyQuaternion(f.m.quaternion), amp);
+    } else f.m.position.copy(f.pos);
+    if (f.vel.lengthSq() > 1) {
+      const dir = _v.copy(f.vel).normalize();
+      if (!f.dPrev) { f.dPrev = dir.clone(); f.q = new THREE.Quaternion().setFromUnitVectors(_Z, dir); f.roll = 0; }
+      const lat = _m2.subVectors(dir, f.dPrev), rate = dt > 0 ? lat.length() / dt : 0;       // rad/s turn rate
+      const aoa = Math.min(0.14, rate * 0.35);
+      if (lat.lengthSq() > 1e-10) lat.normalize();
+      const look = _m3.copy(dir).addScaledVector(lat, Math.tan(aoa)).normalize();
+      _q1.setFromUnitVectors(_Z, look);
+      f.q.slerp(_q1, guided ? 1 - Math.exp(-dt / 0.09) : 1);
+      const yawRate = (f.dPrev.x * dir.z - f.dPrev.z * dir.x) / Math.max(dt, 1e-3);          // signed turn about world up
+      const rollT = guided ? clamp(-yawRate * 1.6, -0.9, 0.9) + (f.jit !== undefined ? 0.05 * Math.sin(time * 3.1 + f.jit) : 0) : 0;
+      f.roll += (rollT - f.roll) * (1 - Math.exp(-dt / 0.22));
+      f.m.quaternion.copy(f.q).multiply(_q2.setFromAxisAngle(_Z, f.roll));
+      if (guided) f.m.quaternion.multiply(_q2.setFromEuler(_e1.set(0.012 * Math.sin(time * 5.3 + f.jit), 0.015 * Math.sin(time * 4.1 + f.jit * 1.7), 0)));
+      f.dPrev.copy(dir);
+    }
+    const inEO = eoSees(f.pos.x, f.pos.y, f.pos.z);   // V1.3: the tracker is looking at this round
+    // vapour: from ~12 G, more and bigger the harder it pulls
+    if (f.g > 12 && (inEO || camera.position.distanceTo(f.pos) < 3000) && Math.random() < dt * (f.g - 8) * 1.4) {
+      const r = (f.m.userData.length || 6) * 0.3;
+      _m1.set((Math.random() - 0.5) * r, (Math.random() - 0.5) * r, (Math.random() - 0.3) * r * 2).applyQuaternion(f.m.quaternion).add(f.m.position);
+      smoke.spawn(_m1.x, _m1.y, _m1.z, f.vel.x * 0.02, f.vel.y * 0.02, f.vel.z * 0.02, FX.vapor, Math.min(2.2, 0.6 + f.g / 30));
+    }
     if (f.m.userData.update) f.m.userData.update(dt);
     // trail + motor glow at the tail
     const len = (f.m.userData.length || 6) * 0.5 + 0.6;
-    _v.set(0, 0, -len).applyQuaternion(f.m.quaternion).add(f.pos);
+    _v.set(0, 0, -len).applyQuaternion(f.m.quaternion).add(f.m.position);
     // [RS] motor burnout (sim: Lance ~12.5 s, Dart ~5.8 s after launch): flame out, no new smoke; the old trail drifts away
     const lit = !(v && v.burning === false && f.own && f.age > 1);
     if (!lit && !f.out) { f.out = true; if (f.m.userData.setMotor) f.m.userData.setMotor(false); }
     if (lit && f.lostT < 0.8) glow.spawn(_v.x, _v.y, _v.z, 0, 0, 0, FX.motor, 1);
     // puffs every ~6 m along the path, interpolated back to last frame's tail so low frame rates don't leave gaps
     if (!f.tail) f.tail = _v.clone();
-    const seg = _w.subVectors(_v, f.tail), segL = seg.length(), step = f.aim ? 11 : 6;
-    if (f.lostT < 1 && lit) {
+    // far rounds (v1.1: own missiles stay in state.visible at any range) thin their trail; beyond visual range, none
+    // V1.3: in the EO's view the trail is dense enough for the zoomed frame, and drawn for the EO alone beyond visual range
+    const dc = f.pos.distanceTo(camera.position), seg = _w.subVectors(_v, f.tail), segL = seg.length(), vm = visM();
+    const step = inEO ? eoStep(f.pos) : (f.aim ? 11 : 6) * Math.max(1, dc / 2500);
+    if (f.lostT < 1 && lit && (dc < vm || inEO)) {
       let s = f.trailT;
+      LAY = dc < vm ? 0 : 2;
       for (; s < segL && s < 400; s += step) {
         const k = s / segL;
         smoke.spawn(f.tail.x + seg.x * k + (Math.random() - 0.5), f.tail.y + seg.y * k + (Math.random() - 0.5), f.tail.z + seg.z * k + (Math.random() - 0.5), (Math.random() - 0.5) * 1.5, 0.3, (Math.random() - 0.5) * 1.5, FX.trail, 1);
       }
+      LAY = 0;
       f.trailT = Math.max(0, s - segL);
     }
     f.tail.copy(_v);
@@ -739,12 +931,14 @@
 
   /* ---------------- debris pool ---------------- */
   const debris = [];
+  function setLayer(o, n) { o.layers.set(n); for (let i = 0; i < o.children.length; i++) setLayer(o.children[i], n); }
   function spawnDebris(p, n) {
     for (let i = 0; i < n; i++) {
       const d = debris.find(x => !x.on); if (!d) return;
       d.on = true; d.t = 0; d.o.visible = true; d.o.position.set(p.x, p.y, p.z);
       d.v.set((Math.random() - 0.5) * 60, Math.random() * 25, (Math.random() - 0.5) * 60).multiplyScalar(p.k);
       d.w.set(Math.random() * 4, Math.random() * 4, Math.random() * 4); d.k = p.k; d.o.scale.setScalar(1.4 * p.k);
+      if (d.lay !== LAY) { d.lay = LAY; setLayer(d.o, LAY); }   // V1.3: object layer 1 = hatch camera only, 2 = EO only
     }
   }
   function updateDebris(dt) {
@@ -754,10 +948,12 @@
       d.o.position.addScaledVector(d.v, dt);
       d.o.rotation.x += d.w.x * dt; d.o.rotation.y += d.w.y * dt;
       const p = d.o.position;
+      LAY = d.lay || 0;
       if (Math.random() < dt * 22) glow.spawn(p.x, p.y, p.z, 0, 2, 0, FX.fire, d.k * 0.5);
       if (Math.random() < dt * 14) smoke.spawn(p.x, p.y, p.z, 0, 1, 0, FX.dark, d.k * 0.4);
       if (d.t > 16 || p.y < heightAt(p.x, p.z)) { d.on = false; d.o.visible = false; }
     }
+    LAY = 0;
   }
 
   /* ---------------- persistent emitters (ARM smoke, asset column, burning wrecks) ---------------- */
@@ -823,66 +1019,109 @@
     }
   }
 
-  /* ---------------- environment ---------------- */
+  /* ---------------- environment: time of day × sky (clear / overcast / rain), visual range ---------------- */
+  // top/mid/hor sky gradient, fog colour + near/far, hemi sky/ground/intensity, sun colour/intensity/position.
+  // glow/sb/se: a sun disc + warm bloom at bearing sb, elevation se (dawn, cover page)
   const PRESETS = {
+    dawn: { top: 0x24386a, mid: 0x8a7ca6, hor: 0xf2a27a, fog: 0xc0a0a0, fn: 1300, ff: 6400, hs: 0xb4aed0, hg: 0x3a3226, hi: 0.72, sc: 0xffb888, si: 1.0, sp: [0, 0, 0], stars: 0.12, moon: 0, glow: 0xffc080, sb: 52, se: 3.4, sun: 0.8 },
     day: { top: 0x3f74b0, mid: 0x86aed2, hor: 0xcdd9e2, fog: 0xb3c2d0, fn: 1600, ff: 7200, hs: 0xc4d6ee, hg: 0x3e3b2a, hi: 0.85, sc: 0xfff3e2, si: 1.05, sp: [-1500, 3200, 1200], stars: 0, moon: 0 },
     dusk: { top: 0x0e1830, mid: 0x4a3a4c, hor: 0xc0643a, fog: 0x8a5a4a, fn: 1200, ff: 5200, hs: 0x8a90b0, hg: 0x2a2618, hi: 0.75, sc: 0xffc49a, si: 0.9, sp: [-3000, 1200, 2000], stars: 0, moon: 0 },
     // [v19] cover page: crimson dusk, sun sitting on the horizon behind the battery (bearing sb, elevation se)
-    ember: { top: 0x0a0816, mid: 0x3c1626, hor: 0xe0482a, fog: 0x6e2c24, fn: 700, ff: 5200, hs: 0x8a6a80, hg: 0x2a1812, hi: 0.62, sc: 0xff9a60, si: 0.85, sp: [0, 0, 0], stars: 0.35, moon: 0, glow: 0xffa050, sb: 22, se: 2.2 },
+    ember: { top: 0x0a0816, mid: 0x3c1626, hor: 0xe0482a, fog: 0x6e2c24, fn: 700, ff: 5200, hs: 0x8a6a80, hg: 0x2a1812, hi: 0.62, sc: 0xff9a60, si: 0.85, sp: [0, 0, 0], stars: 0.35, moon: 0, glow: 0xffa050, sb: 22, se: 2.2, sun: 1 },
     night: { top: 0x02040b, mid: 0x060a16, hor: 0x121a2a, fog: 0x0b1019, fn: 700, ff: 4600, hs: 0x2a3a58, hg: 0x06070a, hi: 0.32, sc: 0x9fb4d8, si: 0.28, sp: [2500, 3000, -3500], stars: 1, moon: 1 }
   };
-  const env = { time: 'dusk', weather: 'clear', evNight: false, evStorm: false, cur: null, lightning: 0, nextBolt: 6 };
+  // overcast deck greys (top, mid, horizon, fog) scaled by how much light gets through at each time of day
+  const OVC = [0x6e7780, 0x8a9199, 0xa2a8ae, 0x979ea4], OVC_L = { dawn: 0.62, day: 1, dusk: 0.5, night: 0.1 };
+  const VIS_KM = { clear: 15, overcast: 11, rain: 6 };
+  const env = { time: 'dusk', sky: 'clear', weather: 'clear', visKm: 0, evNight: false, evStorm: false, cur: null, lightning: 0, nextBolt: 6, wt: undefined, ws: undefined, wv: undefined };
+  const _c1 = new THREE.Color(), _c2 = new THREE.Color();
   function applyEnv() {
     const night = env.evNight || env.time === 'night', storm = env.evStorm || env.weather === 'storm';
-    const P = title.on ? PRESETS.ember : PRESETS[night ? 'night' : env.time] || PRESETS.dusk, C = h => new THREE.Color(h);
-    smokeLight = title.on ? 0.5 : (night ? 0.3 : env.time === 'day' ? 1 : 0.85) * (storm ? 0.75 : 1);
+    const sky = title.on ? 'clear' : storm ? 'rain' : env.sky, time = night ? 'night' : env.time;
+    const P = title.on ? PRESETS.ember : PRESETS[time] || PRESETS.dusk, C = h => new THREE.Color(h);
+    const ovc = sky !== 'clear', wet = sky === 'rain';
+    // visual range: clear 15, overcast 11, rain 6 km; night halves it (min 3). The sim's state.weather.visKm already folds in the
+    // storm/night events, so take the smaller of the two (a scene-only event still closes the haze in)
+    const visCalc = Math.max(3, VIS_KM[sky] * (night ? 0.5 : 1)), visKm = env.visKm > 0 ? Math.min(env.visKm, visCalc) : visCalc;
+    smokeLight = title.on ? 0.5 : (night ? 0.3 : time === 'day' ? 1 : time === 'dawn' ? 0.9 : 0.85) * (wet ? 0.72 : ovc ? 0.86 : 1);
     const top = C(P.top), mid = C(P.mid), hor = C(P.hor), fog = C(P.fog);
     let fn = P.fn, ff = P.ff, hi = P.hi, si = P.si;
-    if (storm) {
-      const g = night ? [0x07090c, 0x0e1116, 0x161a20, 0x12151a] : [0x3a3f45, 0x4d5358, 0x5d6368, 0x565c61];
-      top.lerp(C(g[0]), 0.85); mid.lerp(C(g[1]), 0.85); hor.lerp(C(g[2]), 0.85); fog.lerp(C(g[3]), 0.9);
-      fn = 150; ff = night ? 1900 : 2400; hi *= 0.7; si *= 0.25;
-    }
-    const pos = skyGeo.attributes.position, col = skyGeo.attributes.color, c = new THREE.Color();
+    if (ovc) {
+      const L = (OVC_L[time] || 0.5) * (wet ? 0.68 : 1) * (storm ? 0.85 : 1), k = wet ? 0.93 : 0.85;
+      [top, mid, hor, fog].forEach((c, i) => c.lerp(_c1.set(OVC[i]).multiplyScalar(L), k));
+      hor.lerp(fog, time !== 'night' ? 0.8 : 0.5);                       // a flat, featureless horizon haze under the deck
+      hi = P.hi * (wet ? 0.8 : 1.12) * (time === 'night' ? 0.8 : 1); si = P.si * (wet ? 0.18 : 0.3);   // flat light: sky fill, a weak diffuse sun
+      fn = wet ? 120 : P.fn * 0.75; ff = Math.min(wet ? 1e9 : P.ff, visKm * 1000 * (wet ? 0.72 : 0.62));
+    } else ff = Math.min(ff, visKm * 1000);
+    const pos = skyGeo.attributes.position, col = skyGeo.attributes.color, c = _c2;
+    const glowC = P.glow && !ovc ? C(P.glow) : null, [gx, gz] = dirOf(P.sb || 0);
     for (let i = 0; i < pos.count; i++) {
       const y = pos.getY(i) / 9500;
       if (y > 0.25) c.copy(mid).lerp(top, Math.min(1, (y - 0.25) / 0.5)); else c.copy(hor).lerp(mid, Math.max(0, y / 0.25));
       if (y < 0) c.copy(hor).lerp(fog, Math.min(1, -y * 4));
-      if (P.glow) {                              // warm bloom toward the sun, strongest on the horizon
-        const [gx, gz] = dirOf(P.sb), l = Math.hypot(pos.getX(i), pos.getZ(i)) || 1;
+      if (glowC) {                              // warm bloom toward the sun, strongest on the horizon
+        const l = Math.hypot(pos.getX(i), pos.getZ(i)) || 1;
         const d = Math.max(0, (pos.getX(i) * gx + pos.getZ(i) * gz) / l), k = Math.pow(d, 5) * Math.max(0, 1 - Math.abs(y) * 2.6);
-        c.lerp(C(P.glow), Math.min(0.85, k));
+        c.lerp(glowC, Math.min(0.85, k));
       }
       col.setXYZ(i, c.r, c.g, c.b);
     }
     col.needsUpdate = true;
-    scene.fog.color.copy(fog); scene.fog.near = fn; scene.fog.far = ff; renderer.setClearColor(fog);
-    U.fogColor.value.copy(fog); U.fogNear.value = fn; U.fogFar.value = ff;
+    scene.fog.color.copy(fog); renderer.setClearColor(fog);
+    U.fogColor.value.copy(fog);
     hemi.color.set(P.hs); hemi.groundColor.set(P.hg); hemi.intensity = hi;
     sun.color.set(P.sc); sun.intensity = si; sun.position.set(P.sp[0], P.sp[1], P.sp[2]);
+    if (ovc) { hemi.color.lerp(_c1.set(0xc8ccd2).multiplyScalar(OVC_L[time] > 0.3 ? 1 : 0.4), 0.7); sun.color.lerp(_c1.set(0xdfe3e8), 0.8); }
     if (P.sb !== undefined) {                     // sun from bearing/elevation; the disc sits on the horizon
       const [sx, sz] = dirOf(P.sb), ce = Math.cos(P.se * D2R), se = Math.sin(P.se * D2R);
       sun.position.set(sx * 3000, 3000 * Math.max(0.08, se), sz * 3000);
       sunSpr.position.set(sx * 8800 * ce, 8800 * se, sz * 8800 * ce); sunHalo.position.copy(sunSpr.position);
+      sunSpr.material.opacity = sunHalo.material.opacity = P.sun || 1;
     }
-    sunSpr.visible = sunHalo.visible = !!P.glow;
-    stars.visible = P.stars > 0 && !storm; stars.material.opacity = P.stars * 0.85;
-    moon.visible = !!P.moon && !storm;
-    rain.ls.visible = storm;
+    sunSpr.visible = sunHalo.visible = !!glowC;
+    stars.visible = P.stars > 0 && !ovc; stars.material.opacity = P.stars * 0.85;
+    moon.visible = !!P.moon && !ovc;
+    rain.ls.visible = wet;
+    rain.ls.material.opacity = night ? 0.3 : 0.42;
+    // wet ground: darker, a touch cooler; the grass too
+    // overcast: the flat light mutes the straw a little
+    const wk = wet ? 0.6 : ovc ? 0.9 : 1, wb = wet ? 0.7 : ovc ? 0.92 : 1;
+    terrainMat.color.setRGB(wk, wk, wb);
+    if (farGround) farGround.mat.color.setRGB(wk, wk, wb);
+    for (const L of grassLayers) L.mesh.material.color.setRGB(wet ? 0.58 : ovc ? 0.84 : 1, wet ? 0.6 : ovc ? 0.84 : 1, wet ? 0.56 : ovc ? 0.84 : 1);
+    if (cloudDeck) {                              // the deck's underside: a shade darker than the sky overhead
+      cloudDeck.visible = ovc;
+      cloudDeck.material.color.copy(mid).lerp(top, 0.3).multiplyScalar(wet ? 1.12 : 1.22);
+    }
     workLight.intensity = night ? 0.55 : 0;
-    env.cur = { night, storm, hi, skyMul: 1 };
+    env.cur = { night, storm, wet, overcast: ovc, time, sky, visKm, hi, fn, ff, skyMul: 1, sky4: [top, mid, hor, fog] };   // sky4: EO fog matches the dome
+    fogK = -1; fogFor(chase.fog);
+  }
+  // fog distances; k = chase-camera blend (the chase view opens the haze out toward the full visual range)
+  let fogK = -1;
+  const visM = () => (env.cur ? env.cur.visKm : 15) * 1000;
+  function fogFor(k) {
+    const E = env.cur; if (!E || k === fogK) return;
+    fogK = k;
+    // up high the air below is thinner than the ground-level haze: let the ground show through out to ~1.6× visual range
+    const ffC = Math.max(E.ff, Math.min(28000, E.visKm * 1000 * 1.6)), fnC = Math.max(E.fn, ffC * 0.1);
+    const fn = E.fn + (fnC - E.fn) * k, ff = E.ff + (ffC - E.ff) * k;
+    scene.fog.near = fn; scene.fog.far = ff; U.fogNear.value = fn; U.fogFar.value = ff;
   }
   function updateEnv(dt) {
     const E = env.cur; if (!E) return;
-    if (E.storm) {
-      // rain streaks in a box ahead of the camera
-      const R = rain, c = camera.position, [fx, fz] = dirOf(VIEW_BRG), cx = c.x + fx * 30, cz = c.z + fz * 30;
+    if (E.wet) {
+      // rain streaks in a box ahead of the camera, slanted by the wind
+      const R = rain, c = camera.position;
+      camera.getWorldDirection(_w); const cx = c.x + _w.x * 30, cz = c.z + _w.z * 30, fall = E.storm ? 30 : 26;
       for (let i = 0; i < R.d.length; i++) {
-        const d = R.d[i]; d.y -= 26 * dt; if (d.y < -3) d.y += 40;
+        const d = R.d[i]; d.y -= fall * dt; if (d.y < -3) d.y += 40;
         const x = cx + d.x, y = c.y + d.y, z = cz + d.z, o = i * 6;
-        R.P[o] = x; R.P[o + 1] = y; R.P[o + 2] = z; R.P[o + 3] = x + 0.25; R.P[o + 4] = y + 1.6; R.P[o + 5] = z;
+        R.P[o] = x; R.P[o + 1] = y; R.P[o + 2] = z; R.P[o + 3] = x + 0.3; R.P[o + 4] = y + 1.7; R.P[o + 5] = z + 0.1;
       }
       R.ls.geometry.attributes.position.needsUpdate = true;
+    }
+    if (E.storm) {
       env.nextBolt -= dt;
       if (env.nextBolt <= 0) {
         env.nextBolt = 5 + Math.random() * 10; env.lightning = 0.55;
@@ -901,6 +1140,13 @@
     hemi.intensity = E.hi + (L ? 1.6 : 0);
     skyMesh.material.color.setScalar(L ? 2.2 : 1);
   }
+  // ShiftDef.weather / state.weather → env (time, sky, visKm)
+  function envFromWeather(w) {
+    w = w || {};
+    env.time = PRESETS[w.time] && w.time !== 'ember' ? w.time : 'dusk';
+    env.sky = VIS_KM[w.sky] ? w.sky : 'clear';
+    env.weather = 'clear'; env.visKm = isFinite(w.visKm) && w.visKm > 0 ? +w.visKm : 0;
+  }
 
   /* ---------------- bus hookup ---------------- */
   let shakeT = 0;
@@ -911,19 +1157,24 @@
       T.queue.push(p.missileId); queued[p.missileId] = p.launcherId;
     });
     on('INTERCEPT', p => {
+      if (chase.id === p.missileId && chase.mode === 'follow' && flights[p.missileId]) { chase.last.set(p.x * 1000, p.alt, -p.y * 1000); chase.burst = true; }
       endFlight(p.missileId, false);
-      const q = fxPos(p.x * 1000, p.alt, -p.y * 1000);
-      burst(flare, q, FX.flash, 2, 0, 1); burst(glow, q, FX.ball, 6, 25, 0.8); burst(glow, q, FX.ember, 14, 120, 1.5); burst(smoke, q, FX.puffBig, 6, 14, 0.7);
+      const q = fxAt(p.x * 1000, p.alt, -p.y * 1000, q => {
+        burst(flare, q, FX.flash, 2, 0, 1); burst(glow, q, FX.ball, 6, 25, 0.8); burst(glow, q, FX.ember, 14, 120, 1.5); burst(smoke, q, FX.puffBig, 6, 14, 0.7);
+      });
       pulseLight(q.x, q.y, q.z, 1);
     });
     on('KILL', p => {
-      const q = fxPos(p.x * 1000, p.alt, -p.y * 1000);
-      burst(flare, q, FX.flash, 1, 0, 1.6); burst(glow, q, FX.ball, 16, 40, 1.3); burst(glow, q, FX.ember, 24, 160, 1.6);
-      burst(smoke, q, FX.puffBig, 12, 22, 1); spawnDebris(q, 4);
+      const q = fxAt(p.x * 1000, p.alt, -p.y * 1000, q => {
+        burst(flare, q, FX.flash, 1, 0, 1.6); burst(glow, q, FX.ball, 16, 40, 1.3); burst(glow, q, FX.ember, 24, 160, 1.6);
+        burst(smoke, q, FX.puffBig, 12, 22, 1); spawnDebris(q, 4);
+      });
       pulseLight(q.x, q.y, q.z, 1.2);
       if (q.d < 3000) api.shake(0.3 * (1 - q.d / 3000));
+      eoEvent('KILL', p);
     });
-    on('MISS', p => endFlight(p.missileId, true));
+    on('MISS', p => { endFlight(p.missileId, true); eoEvent('MISS', p); });
+    on('TRACK_LOST', p => eoEvent('LOST', p));
     on('RELOAD_START', p => {                // first canister swap starts now; the rest follow the sim's reload timer
       const T = tels[p.launcherId]; if (!T || !T.vendor) return;
       T.reloadDur = p.seconds;
@@ -950,12 +1201,15 @@
       if (p.kind === 'storm') { env.evStorm = !!p.active; applyEnv(); }
     });
     on('RADAR_STATE', p => { radarOn = !!p.on; });
-    on('SHIFT_START', () => {
+    on('SHIFT_END', () => { if (chase.mode) chaseReset(); });   // debrief: back in the shelter at once
+    on('SHIFT_START', p => {
       for (const id in actors) removeActor(id);
       for (const id in flights) endFlight(id, false);
       for (const id in queued) delete queued[id];
       for (const id in tels) tels[id].queue.length = 0;
-      emitters.length = 0; radarDmg = 0; gunFire = 0; env.evNight = env.evStorm = false; applyEnv();
+      emitters.length = 0; radarDmg = 0; gunFire = 0; env.evNight = env.evStorm = false;
+      envFromWeather(p && p.def && p.def.weather); env.wt = env.ws = env.wv = undefined; chaseReset(); applyEnv();
+      eoReset();
     });
   }
   let radarOn = true;
@@ -1032,7 +1286,8 @@
   }
   function setTitle(on) {
     on = !!on; if (on === title.on || !scene) return title.on;
-    title.on = on;
+    title.on = on; if (grassTitle) grassTitle.visible = on;
+    if (chase.mode) chaseReset();
     if (on) titleReset();
     else {
       title.ents.length = 0; for (const id in actors) removeActor(id);
@@ -1069,19 +1324,564 @@
     return m === undefined ? null : { alive: false };
   }
 
+  /* ---------------- v1.1 watch-your-kill: chase camera behind one of our missiles ----------------
+     follow(id) → blend in from the hatch (0.6 s) → ride behind + above the round, looking between its velocity and its
+     target → round gone (intercept/miss): hold ~2.2 s, backing off from the burst → ease home to the hatch over 0.7 s. */
+  const chase = { id: null, mode: null, t: 0, k: 0, fog: 0, seen: false, tgtId: null, tgtAt: -9,
+    pos: new V3(), q: new THREE.Quaternion(), from: new V3(), fromQ: new THREE.Quaternion(), off: new V3(0, 6, 24), look: new V3(0, 0, -1),
+    last: new V3(), lastCam: new V3(), back: new V3(), anchor: new V3(), anchored: false, w: 0 };
+  const HOLD_S = 2.2, EASE_S = 0.7, BLEND_S = 0.6;
+  const _cq = new THREE.Quaternion(), _cm = new THREE.Matrix4(), _cu = new V3(0, 1, 0), _ct = new V3(), _cd = new V3();
+  function chaseReset() {
+    const was = chase.id;
+    chase.id = null; chase.mode = null; chase.k = 0; chase.fog = 0;
+    if (shelter) shelter.visible = !title.on;
+    if (was) RS.bus.emit('CAM_FOLLOW', { id: null });
+  }
+  function follow(id) {
+    if (id == null) {
+      if (!chase.mode || chase.mode === 'ease') return true;
+      startEase(); return true;
+    }
+    if (title.on || !scene) return false;
+    const vis = lastState && lastState.visible;
+    const known = flights[id] || queued[id] || (vis && vis.some(v => v.id === id && (v.kind === 'missile_lance' || v.kind === 'missile_dart')));
+    if (!known) return false;
+    const fresh = chase.mode !== 'follow' || chase.id !== id;
+    if (chase.mode !== 'follow' && chase.mode !== 'hold') { chase.from.copy(camera.position); chase.fromQ.copy(camera.quaternion); chase.k = 0; }
+    else if (chase.id !== id) { chase.from.copy(chase.pos); chase.fromQ.copy(chase.q); chase.k = 0; }
+    chase.id = id; chase.mode = 'follow'; chase.t = 0; chase.seen = !!flights[id]; chase.tgtId = null; chase.tgtAt = -9;
+    if (flights[id]) primeChase(flights[id]);
+    if (fresh) RS.bus.emit('CAM_FOLLOW', { id });
+    return true;
+  }
+  function primeChase(f) {                    // start the offset behind the round's current heading
+    _cd.copy(f.vel); if (_cd.lengthSq() < 1) _cd.set(0, 1, 0); _cd.normalize();
+    chase.look.copy(_cd); chase.off.copy(_cd).multiplyScalar(-24); chase.off.y += 6;
+  }
+  function startEase() {
+    const was = chase.id;
+    chase.mode = 'ease'; chase.t = 0; chase.id = null;
+    chase.from.copy(chase.pos); chase.fromQ.copy(chase.q);
+    if (was) RS.bus.emit('CAM_FOLLOW', { id: null });
+  }
+  // where the round's target is (scene metres) — truth entity nearest the sim track, re-resolved every 0.5 s
+  function chaseTarget(state, f) {
+    if (!state) return null;
+    if (time - chase.tgtAt > 0.5) {
+      chase.tgtAt = time; chase.tgtId = null;
+      const m = state.missiles && state.missiles.find(q => q.id === chase.id);
+      const tr = m && state.tracks ? state.tracks.find(t => t.id === m.targetId) : null;
+      const vis = state.visible || [];
+      if (m && m.targetEnt) chase.tgtId = m.targetEnt;
+      else if (tr) {
+        let best = 3.5;
+        for (const v of vis) {
+          if (v.kind === 'missile_lance' || v.kind === 'missile_dart') continue;
+          const d = Math.hypot(v.x - tr.x, v.y - tr.y, (v.alt - tr.alt) / 1000);
+          if (d < best) { best = d; chase.tgtId = v.id; }
+        }
+        if (!chase.tgtId) { chase.tgtId = '#' + tr.id; }
+      }
+    }
+    if (!chase.tgtId) return null;
+    if (chase.tgtId[0] === '#') {
+      const tr = state.tracks && state.tracks.find(t => t.id === chase.tgtId.slice(1));
+      return tr ? _ct.set(tr.x * 1000, tr.alt, -tr.y * 1000) : null;
+    }
+    const a = actors[chase.tgtId];
+    return a ? _ct.copy(a.root.position) : null;
+  }
+  // called after the hatch pose is set: overrides the camera while following / holding / easing home
+  function updateChase(dt, state) {
+    if (!chase.mode) return;
+    chase.t += dt;
+    const f = chase.id && flights[chase.id];
+    if (chase.mode === 'follow') {
+      if (f) {
+        if (!chase.seen) { chase.seen = true; primeChase(f); }
+        chase.k = Math.min(1, chase.k + dt / BLEND_S);
+        _cd.copy(f.vel); if (_cd.lengthSq() < 1) _cd.copy(chase.look); _cd.normalize();
+        const tp = chaseTarget(state, f);
+        if (tp) { _w.subVectors(tp, f.pos); const dist = _w.length(); if (dist > 1) { _w.divideScalar(dist); if (_w.dot(_cd) > -0.2) _cd.lerp(_w, dist < 400 ? 0.3 : 0.55).normalize(); } }
+        chase.look.lerp(_cd, 1 - Math.exp(-3.5 * dt)).normalize();
+        // desired offset: behind the look direction, a little above; smoothed so turns swing the view gently
+        _w.copy(chase.look).multiplyScalar(-24); _w.y += 6;
+        chase.off.lerp(_w, 1 - Math.exp(-2.5 * dt));
+        const A = chase.anchor.copy(f.pos).addScaledVector(f.vel, dt); chase.anchored = true;   // where the round will be after this frame's flight update
+        chase.pos.copy(A).add(chase.off);
+        const gy = heightAt(chase.pos.x, chase.pos.z) + 9; if (chase.pos.y < gy) chase.pos.y = gy;
+        chase.last.copy(A); chase.lastCam.copy(chase.pos);
+        _w.copy(A).addScaledVector(chase.look, 160);
+        _cm.lookAt(chase.pos, _w, _cu); chase.q.setFromRotationMatrix(_cm);
+      } else if (chase.seen) {                // the round is gone: hold on the burst
+        chase.mode = 'hold'; chase.t = 0;
+        chase.back.subVectors(chase.lastCam, chase.last); if (chase.back.lengthSq() < 1) chase.back.set(0, 0.3, 1); chase.back.normalize();
+      } else if (!queued[chase.id] && chase.t > 2) { startEase(); }   // never showed up
+      else { chase.pos.copy(camera.position); chase.q.copy(camera.quaternion); chase.from.copy(camera.position); chase.fromQ.copy(camera.quaternion); return; }
+    }
+    if (chase.mode === 'hold') {
+      const s = sstep(0, 1.3, chase.t);
+      chase.pos.copy(chase.lastCam).addScaledVector(chase.back, 90 * s); chase.pos.y += 25 * s;
+      const gy = heightAt(chase.pos.x, chase.pos.z) + 9; if (chase.pos.y < gy) chase.pos.y = gy;
+      _cm.lookAt(chase.pos, chase.last, _cu); _cq.setFromRotationMatrix(_cm); chase.q.slerp(_cq, 1 - Math.exp(-7 * dt));
+      if (chase.t >= HOLD_S) startEase();
+    }
+    if (chase.mode === 'ease') {
+      const s = sstep(0, 1, chase.t / EASE_S);
+      if (s >= 1) { chaseReset(); shakeT = 0; return; }
+      chase.pos.lerpVectors(chase.from, camera.position, s);
+      chase.q.copy(chase.fromQ).slerp(camera.quaternion, s);
+      chase.k = 1 - s;
+    }
+    const k = chase.mode === 'follow' ? sstep(0, 1, chase.k) : 1;
+    chase.w = k; camera.position.lerp(chase.pos, k); camera.quaternion.slerp(chase.q, k);
+    chase.fog = Math.round((chase.mode === 'ease' ? 1 - sstep(0, 1, chase.t / EASE_S) : k) * 20) / 20;
+    if (shelter) shelter.visible = false;
+  }
+
+  /* ---------------- V1.3 EO tracking camera (Pantsir-style TV/IR tracker) ----------------
+     A zoomed camera on a turret ~7 m above the shelter, slaved to the selected track (the sim puts its entity in state.visible
+     at any range with sel:true). Rendered on the same WebGL context: the EO pass goes into a small render target (inset pixel
+     size), then a post pass (grain, vignette, haze compensation, IR white-hot curve) draws it into the inset viewport (scissor).
+     Tap-to-swap: the EO fills the hatch and the battery view is drawn into the inset instead. The EO pass never draws the grass,
+     shelter, trees, rain or battery vehicles; far targets get their high LOD + true-size effects (particle layer 2). */
+  const EO_H = 7, FOV_MIN = 0.2, FOV_MAX = 20, FOV_IDLE = 16, SLEW = 60, HOLD_EO = 4, IDLE_S = 3, FRAC = 0.35;
+  const EO_SIZE = { jet_hostile: 17, jet_friend: 16, strike_friend: 16, transport: 44, helo_hostile: 17, helo_friend: 17, cruise_missile: 6.5, arm_missile: 4.5, drone: 5 };
+  const eoHide = [];                         // trees + battery vehicles (filled at build)
+  const eoAct = []; let eoActN = 0;          // actors inside the EO's view this frame (forced high LOD, visible) for the EO pass
+  const EOT = { uEOClip: { value: 0 }, uEOCam: { value: new V3() }, uEOTgt: { value: new V3() }, uEOW: { value: new THREE.Vector2(1300, 0.02) }, uEOH: { value: 0.001 } };
+  const eo = {
+    on: false, live: false, swapped: false, manual: null, mode: 'TV', auto: true,
+    tgtId: null, trackId: null, kind: null, size: 15, hasTarget: false, hasAim: false, holding: false, holdT: 0, idleT: 0, fresh: true,
+    pos: new V3(), aim: new V3(), dir: new V3(0, 0, -1), cosCone: 0.9, rangeMax: 35000,
+    az: VIEW_BRG, el: 5, fov: FOV_IDLE, err: 0, rAz: 0, rEl: 0, pAz: 0, pEl: 0, rangeM: 0, rangeKm: 0, inRange: true, slewing: false,
+    holdFov: 1, lostReason: null, event: null, W: 390, H: 300, rectN: { x: 0, y: 0, w: 180, h: 135 }, rectS: { x: 0, y: 0, w: 120, h: 90 }, rectL: { x: 0, y: 0, w: 180, h: 135 }, face: null, gate: { x: 0, y: 0, w: 0, h: 0 }, gateOn: false,
+    cam: null, rt: null, post: null, hot: null, fogNear: 1, fogFar: 2, dehaze: 1, bg: new THREE.Color(),
+    stats: { main: { calls: 0, tris: 0 }, eo: { calls: 0, tris: 0 }, post: { calls: 0, tris: 0 }, cab: { calls: 0, tris: 0 } }
+  };
+  const _eoV = new V3();
+  const wrap180 = a => ((a % 360) + 540) % 360 - 180;
+  // EO pass only: in a corridor along the line of sight the terrain is held under it — in front of the target (the sim has
+  // no terrain masking, so a low cruise missile behind a hill must still be seen) and behind it, just under the frame centre
+  // (a low flier reads against the sky with the skyline right below it instead of a wall of hillside)
+  function eoClip(mat) {
+    mat.onBeforeCompile = sh => {
+      Object.assign(sh.uniforms, EOT);
+      sh.vertexShader = 'uniform float uEOClip; uniform vec3 uEOCam; uniform vec3 uEOTgt; uniform vec2 uEOW; uniform float uEOH;\n' + sh.vertexShader.replace('#include <begin_vertex>', `#include <begin_vertex>
+        if (uEOClip > 0.5) {
+          vec4 eW = modelMatrix * vec4(transformed, 1.0);
+          vec2 eD = eW.xz - uEOCam.xz, eL = uEOTgt.xz - uEOCam.xz;
+          float eR = max(length(eL), 1.0); vec2 eU = eL / eR;
+          float eA = dot(eD, eU), eLat = abs(eD.x * eU.y - eD.y * eU.x), eWd = uEOW.x + eA * uEOW.y, eS = (uEOTgt.y - uEOCam.y) / eR;
+          float eLim = eA < eR ? uEOCam.y + eS * eA - 6.0 - eA * 0.004 : uEOCam.y + eA * (eS - uEOH);
+          float eK = eA > 0.0 ? 1.0 - smoothstep(eWd, eWd * 1.8, eLat) : 0.0;
+          if (eW.y > eLim) transformed.y -= (eW.y - eLim) * eK;
+        }`);
+    };
+  }
+  // is world point (x,y,z) inside the tracker's view cone (last frame's pose) and inside EO range?
+  function eoSees(x, y, z) {
+    if (!eo.live) return false;
+    const c = eo.pos, dx = x - c.x, dy = y - c.y, dz = z - c.z, d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d < 1 || d > eo.rangeMax) return false;
+    return (dx * eo.dir.x + dy * eo.dir.y + dz * eo.dir.z) / d > eo.cosCone;
+  }
+  // trail puff spacing (m) that reads as a continuous trail in the zoomed EO frame
+  function eoStep(p) { return clamp(p.distanceTo(eo.pos) * eo.fov * D2R / 50, 6, 60); }
+  function eoRangeKm(ir) {
+    const E = env.cur, vk = E ? E.visKm : 15;
+    return ir ? Math.min(40, vk * 3) : Math.min(35, vk * 2.5) * (E && E.night ? 0.45 : 1);   // night TV is poor
+  }
+  function eoReset() {                         // shift start: AUTO mode, normal layout, no target
+    eo.manual = null; eo.swapped = false; eo.tgtId = null; eo.trackId = null; eo.hasTarget = eo.hasAim = eo.holding = false;
+    eo.idleT = IDLE_S; eo.az = VIEW_BRG; eo.el = 5; eo.fov = FOV_IDLE; eo.event = null; eo.lostReason = null;
+  }
+  function eoEvent(type, p) {
+    const watched = eo.trackId && (p.targetId === eo.trackId || p.trackId === eo.trackId || p.id === eo.trackId);
+    if (!watched) return;
+    eo.event = { type, t: time, reason: p.reason || null };
+    if (type === 'KILL' && isFinite(p.x)) { eo.aim.set(p.x * 1000, p.alt, -p.y * 1000); eo.hasAim = true; }   // hold on the burst
+    if (type === 'LOST') eo.lostReason = p.reason || null;
+  }
+  /* V1.4 cabin screens. rectN = the EO monitor's picture at the seat's rest pose (bbox, CSS px in the hatch; sizes the render
+     target), rectS = swapped: the EO fills the cabin view above the radar monitor (the radar stays visible and tappable).
+     Live quads (TL,TR,BR,BL CSS px) are projected every frame from the cabin model for RS.cabin (DOM matrix3d). */
+  const Q = { radar: [0, 0, 0, 0, 0, 0, 0, 0], eo: [0, 0, 0, 0, 0, 0, 0, 0], sw: [0, 0, 0, 0, 0, 0, 0, 0], rRadar: [0, 0, 0, 0, 0, 0, 0, 0], rEo: [0, 0, 0, 0, 0, 0, 0, 0],
+    okR: false, okE: false, lens: 0, win: { x: 0, y: 0, w: 0, h: 0, full: true } };
+  const _qv = new V3();
+  // cabin-local corners → CSS px with camera C (false if a corner is behind the camera)
+  function projQuad(C, pts, out, W, H) {
+    for (let i = 0; i < 4; i++) {
+      _qv.copy(pts[i]).applyMatrix4(cab.group.matrixWorld).applyMatrix4(C.matrixWorldInverse);
+      if (_qv.z > -0.02) return false;
+      _qv.applyMatrix4(C.projectionMatrix);
+      out[i * 2] = (_qv.x + 1) / 2 * W; out[i * 2 + 1] = (1 - _qv.y) / 2 * H;
+    }
+    return true;
+  }
+  function bbox(q, r) {
+    const x0 = Math.min(q[0], q[2], q[4], q[6]), x1 = Math.max(q[0], q[2], q[4], q[6]), y0 = Math.min(q[1], q[3], q[5], q[7]), y1 = Math.max(q[1], q[3], q[5], q[7]);
+    r.x = Math.round(x0); r.y = Math.round(y0); r.w = Math.round(x1 - x0); r.h = Math.round(y1 - y0); return r;
+  }
+  // seat projection: horizontal FOV fixed (the radar monitor spans the width); a narrower-than-design hatch gets a small lens
+  // shift up so the radar's bottom edge stays on screen; a wide one opens the view instead
+  function seatProj(C, w, h) {
+    const S = RS.cabin.SEAT, asp = w / Math.max(1, h), tvRef = S.tanH / S.aspect;
+    let tv = S.tanH / asp; if (tv < tvRef * 0.9) tv = tvRef * 0.9;
+    C.aspect = asp; C.fov = 2 * Math.atan(tv) / D2R;
+    const r = tvRef / tv, lens = r > 1 ? 0.966 * (r - 1) : 0;      // NDC shift that keeps the radar bottom (NDC −0.966 by design) in view
+    Q.lens = lens;
+    if (lens > 0.001) C.setViewOffset(w, h, 0, lens * h / 2, w, h); else C.clearViewOffset();
+    C.updateProjectionMatrix();
+  }
+  const _sq = new THREE.Quaternion(), _se = new THREE.Euler(0, 0, 0, 'YXZ');
+  function seatPose(C, yaw, pitch, roll, dx, dy) {
+    const g = cab.group;
+    _v.set(dx, dy, 0).applyQuaternion(g.quaternion); C.position.copy(g.position).add(_v);
+    _se.set((RS.cabin.SEAT.pitch + pitch) * D2R, yaw * D2R, roll * D2R, 'YXZ'); _sq.setFromEuler(_se);
+    C.quaternion.copy(g.quaternion).multiply(_sq);
+  }
+  function eoLayout(w, h) {
+    eo.W = w; eo.H = h;
+    if (!cab) return;
+    seatProj(seatCam, w, h); seatPose(seatCam, 0, 0, 0, 0, 0); seatCam.updateMatrixWorld();
+    projQuad(seatCam, cab.rects.radar, Q.rRadar, w, h); projQuad(seatCam, cab.rects.eo, Q.rEo, w, h);
+    bbox(Q.rEo, eo.rectN);
+    const top = Math.max(60, Math.round(Math.min(Q.rRadar[1], Q.rRadar[3])) - 3);
+    eo.rectS.x = 0; eo.rectS.y = 0; eo.rectS.w = w; eo.rectS.h = top;
+    const S = Q.sw; S[0] = 0; S[1] = 0; S[2] = w; S[3] = 0; S[4] = w; S[5] = top; S[6] = 0; S[7] = top;
+  }
+  // this frame's quads (after the camera pose) + the scissor box of the windows for the world pass
+  function cabinQuads() {
+    const on = !!(cab && shelter.visible);
+    Q.okR = on && projQuad(camera, cab.rects.radar, Q.radar, eo.W, eo.H);
+    Q.okE = on && projQuad(camera, cab.rects.eo, Q.eo, eo.W, eo.H);
+    if (Q.okE) bbox(Q.eo, eo.rectL);
+    // world pass scissor: bbox of the window openings (full frame if any corner is behind the camera)
+    const Wn = Q.win, P = cab ? cab.windows : null; Wn.full = true;
+    if (!on || !P) return;
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (let i = 0; i < P.length; i++) {
+      _qv.copy(P[i]).applyMatrix4(cab.group.matrixWorld).applyMatrix4(camera.matrixWorldInverse);
+      if (_qv.z > -0.02) return;
+      _qv.applyMatrix4(camera.projectionMatrix);
+      const x = (_qv.x + 1) / 2 * eo.W, y = (1 - _qv.y) / 2 * eo.H;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    }
+    x0 = Math.max(0, Math.floor(x0) - 2); y0 = Math.max(0, Math.floor(y0) - 2); x1 = Math.min(eo.W, Math.ceil(x1) + 2); y1 = Math.min(eo.H, Math.ceil(y1) + 2);
+    if (x1 <= x0 || y1 <= y0) { Wn.x = Wn.y = 0; Wn.w = Wn.h = 0; Wn.full = false; return; }
+    Wn.x = x0; Wn.y = y0; Wn.w = x1 - x0; Wn.h = y1 - y0; Wn.full = false;
+  }
+  function screenQuad(name) {
+    if (name === 'radar') return Q.okR ? Q.radar : null;
+    if (name === 'eo') return !eo.on || !(cab && shelter.visible) ? null : eo.swapped ? Q.sw : Q.okE ? Q.eo : null;
+    return null;
+  }
+  // cabin light from the world's sky / sun (per frame: lightning flashes the sky light too); no allocations
+  const _ci = new THREE.Quaternion(), SCR_C = new THREE.Color(0.55, 0.78, 1.0), LMP_C = new THREE.Color(1.0, 0.1, 0.05);
+  function cabinLight() {
+    const u = cab.uniforms, g = cab.glassU, E = env.cur || {}, night = !!E.night, dusk = E.time === 'dusk' || E.time === 'dawn', ovc = !!E.overcast;
+    const hk = hemi.intensity;
+    u.uSky.value.copy(hemi.color).multiplyScalar(hk * 1.05); u.uGnd.value.copy(hemi.color).lerp(hemi.groundColor, 0.35).multiplyScalar(hk * 0.62);   // bounce off the white interior
+    _ci.copy(cab.group.quaternion).invert();
+    _v.copy(sun.position).normalize().applyQuaternion(_ci); u.uSunD.value.copy(_v);
+    const front = clamp(-_v.z, 0, 1) * 0.75 + 0.25;                       // the sun shines in through the windshield when it is ahead
+    u.uSunC.value.copy(sun.color).multiplyScalar(sun.intensity * (night ? 0.2 : 1.05) * front);
+    u.uScr.value.copy(SCR_C).multiplyScalar(night ? 0.34 : dusk ? 0.22 : ovc ? 0.16 : 0.12);
+    u.uLmp.value.copy(LMP_C).multiplyScalar(night ? 0.42 : dusk ? 0.08 : 0);
+    const f = night ? 0.018 : dusk ? 0.08 : 0.2; u.uFill.value.setRGB(f * (night ? 1.6 : 1), f * (night ? 0.7 : 1), f * (night ? 0.7 : 1.02));
+    u.uSelf.value = night ? 0.85 : 1;
+    g.uTime.value = time; g.uRain.value = E.wet ? (E.storm ? 1 : 0.8) : 0; g.uNight.value = night ? 1 : 0;
+    g.uGlare.value.copy(hemi.color).multiplyScalar(Math.min(1, hk * 1.1));
+    g.uTint.value.setRGB(0.5, 0.58, 0.56).multiplyScalar(night ? 0.2 : dusk ? 0.6 : 1);
+    if (night) g.uIn.value.setRGB(0.13, 0.03, 0.03); else g.uIn.value.setRGB(0.02, 0.03, 0.04);
+  }
+  const POST_VS = 'varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
+  // V1.4: the same post shader runs on the cabin's EO monitor face (ON_MESH: log depth, monitor glare, no-signal screen)
+  const FACE_VS = `
+    #include <common>
+    #include <logdepthbuf_pars_vertex>
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      #include <logdepthbuf_vertex>
+    }`;
+  const POST_FS = `
+    #ifdef ON_MESH
+    #include <common>
+    #include <logdepthbuf_pars_fragment>
+    #endif
+    uniform sampler2D tMap; uniform vec2 uRes; uniform float uIR, uGain, uNoise, uTime, uDehaze, uOn; uniform vec3 uBg;
+    varying vec2 vUv;
+    const vec3 W = vec3(0.299, 0.587, 0.114);
+    float rnd(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
+    void main() {
+      #ifdef ON_MESH
+      #include <logdepthbuf_fragment>
+      if (uOn < 0.5) { float z = rnd(floor(vUv * vec2(160.0, 120.0)) + floor(uTime * 12.0)); gl_FragColor = vec4(vec3(0.03, 0.045, 0.05) + z * 0.025, 1.0); return; }
+      #endif
+      vec3 c = texture2D(tMap, vUv).rgb;
+      float n = rnd(floor(vUv * uRes) + floor(fract(uTime * 7.13) * 97.0)) - 0.5;      // fine grain, new every frame
+      if (uIR > 0.5) {                                   // white-hot thermal: luminance curve, hot spots bloom a touch
+        vec2 px = 1.5 / uRes;
+        float l = dot(c, W), m = max(max(dot(texture2D(tMap, vUv + vec2(px.x, 0.0)).rgb, W), dot(texture2D(tMap, vUv - vec2(px.x, 0.0)).rgb, W)),
+          max(dot(texture2D(tMap, vUv + vec2(0.0, px.y)).rgb, W), dot(texture2D(tMap, vUv - vec2(0.0, px.y)).rgb, W)));
+        l = max(l, m * 0.8 * smoothstep(0.45, 0.7, m));
+        float b = dot(uBg, W);
+        l = b + (l - b) * uDehaze;                       // haze compensation (auto contrast on the target range)
+        c = vec3(smoothstep(0.03, 0.92, l));
+      } else {
+        c = uBg + (c - uBg) * uDehaze;
+        c *= uGain;                                      // night: the camera's gain goes up (and so does the noise)
+        c = mix(vec3(dot(c, W)), c, 0.6);                // slightly desaturated
+        c = (c - 0.5) * 1.14 + 0.5;                      // contrasty
+      }
+      c += n * uNoise;
+      vec2 q = vUv - 0.5; c *= 1.0 - 0.9 * dot(q, q);  // vignette
+      #ifdef ON_MESH
+      c *= 0.965 + 0.035 * sin(vUv.y * uRes.y * 3.14159);   // faint scan lines
+      c += vec3(0.05, 0.06, 0.065) * smoothstep(0.18, 0.0, abs(vUv.x * 0.55 - vUv.y + 0.62)) + 0.018;   // monitor glass glare + black level
+      #else
+      c *= 0.965 + 0.035 * sin(gl_FragCoord.y * 3.14159);   // faint scan lines
+      #endif
+      gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+    }`;
+  function eoBuild() {
+    eo.cam = new THREE.PerspectiveCamera(10, 4 / 3, 2, 60000);
+    eo.cam.layers.enable(2);                   // EO-only objects (true-place debris); layer 1 = hatch-only stand-ins
+    camera.layers.enable(1);
+    const o = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, depthBuffer: true, stencilBuffer: false };
+    const MS = THREE.WebGLMultisampleRenderTarget;
+    eo.rt = renderer.capabilities.isWebGL2 && MS ? new MS(8, 8, o) : new THREE.WebGLRenderTarget(8, 8, o);
+    if (eo.rt.samples !== undefined) eo.rt.samples = 4;
+    const mat = new THREE.ShaderMaterial({ vertexShader: POST_VS, fragmentShader: POST_FS, depthTest: false, depthWrite: false,
+      uniforms: { tMap: { value: eo.rt.texture }, uRes: { value: new THREE.Vector2(8, 8) }, uIR: { value: 0 }, uGain: { value: 1 }, uNoise: { value: 0.05 },
+        uTime: { value: 0 }, uDehaze: { value: 1 }, uOn: { value: 1 }, uBg: { value: new THREE.Color() } } });
+    const q = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat); q.frustumCulled = false;
+    const ps = new THREE.Scene(); ps.add(q);
+    eo.post = { scene: ps, cam: new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), mat };
+    eo.face = new THREE.ShaderMaterial({ vertexShader: FACE_VS, fragmentShader: '#define ON_MESH\n' + POST_FS, uniforms: mat.uniforms });   // shared uniforms
+    if (cab) cab.eoFace.material = eo.face;
+    eo.hot = new THREE.MeshLambertMaterial({ color: 0x4a4a4a, emissive: 0x8e8e8e });   // IR: airframes read warm-hot (the tailpipe glow is hotter)
+    for (const id in tels) eoHide.push(tels[id].obj);
+    eoHide.push(gun, radar); for (const id in ground) eoHide.push(ground[id]);
+  }
+  // sky dome colour at elevation el (deg) — the same gradient applyEnv paints on the dome (the EO fog fades targets into it)
+  function skyAt(el, out) {
+    const S = env.cur && env.cur.sky4; if (!S) return out.setRGB(0.6, 0.65, 0.7);
+    const y = Math.sin(el * D2R);
+    if (y > 0.25) out.copy(S[1]).lerp(S[0], Math.min(1, (y - 0.25) / 0.5)); else out.copy(S[2]).lerp(S[1], Math.max(0, y / 0.25));
+    if (y < 0) out.copy(S[2]).lerp(S[3], Math.min(1, -y * 4));
+    return out;
+  }
+  function eoUpdate(dt, state) {
+    const E = eo;
+    E.on = !title.on && !!E.cam;
+    E.live = E.on;
+    if (!E.on) return;
+    const ENV = env.cur || {};
+    E.auto = !E.manual; E.mode = E.manual || (ENV.night || ENV.wet ? 'IR' : 'TV');
+    const ir = E.mode === 'IR', R = eoRangeKm(ir) * 1000;
+    E.rangeMax = R;
+    E.pos.set(0, heightAt(0, 0) + EO_H, 0);
+    // the selected track's entity (sel:true); its actor carries the smooth scene position
+    const vis = state && state.visible; let tv = null;
+    if (vis) for (let i = 0; i < vis.length; i++) { const v = vis[i]; if (v.sel && (!tv || (tv.burning && !v.burning))) tv = v; }
+    const a = tv && actors[tv.id];
+    if (a) {
+      if (E.tgtId !== tv.id) { E.tgtId = tv.id; E.fresh = true; E.kind = tv.kind; E.size = EO_SIZE[tv.kind] || 15; E.event = null; E.lostReason = null; }
+      E.trackId = (state && state.selectedId) || E.trackId;
+      E.aim.copy(a.root.position); E.hasAim = true; E.hasTarget = true; E.holding = false; E.idleT = 0;
+    } else {
+      if (E.hasTarget) {                       // lost (killed / exited / deselected): hold on the last aim point ~4 s
+        E.hasTarget = false; E.holding = true; E.holdT = 0;
+        E.holdFov = clamp(Math.max(E.fov * 1.6, 2 * Math.atan(420 / 2 / Math.max(300, E.rangeM)) / D2R), FOV_MIN, 6);
+      }
+      if (E.holding) { E.holdT += dt; if (E.holdT > HOLD_EO) { E.holding = false; E.hasAim = false; E.tgtId = null; E.trackId = null; E.idleT = 0; } }
+      else { E.idleT += dt; E.tgtId = null; E.trackId = null; }
+    }
+    // desired pointing
+    let tAz = E.az, tEl = E.el;
+    if (E.hasAim) {
+      const dx = E.aim.x - E.pos.x, dy = E.aim.y - E.pos.y, dz = E.aim.z - E.pos.z, hz = Math.hypot(dx, dz);
+      tAz = (Math.atan2(dx, -dz) / D2R + 360) % 360; tEl = Math.atan2(dy, hz) / D2R; E.rangeM = Math.hypot(hz, dy);
+    } else if (E.idleT > IDLE_S) { tAz = VIEW_BRG; tEl = 5; }   // no track for a while: drift back to the hatch bearing
+    // feed-forward of the target's angular rate → a moving target stays centred (no lag) once the servo has caught up
+    if (E.hasTarget && !E.fresh && dt > 0) {
+      const k = Math.min(1, dt * 8);
+      E.rAz += (clamp(wrap180(tAz - E.pAz) / dt, -90, 90) - E.rAz) * k; E.rEl += (clamp((tEl - E.pEl) / dt, -90, 90) - E.rEl) * k;
+    } else { E.rAz = 0; E.rEl = 0; }
+    E.fresh = false; E.pAz = tAz; E.pEl = tEl;
+    // feed-forward first, then close what is left exponentially (so this frame's camera lands on this frame's target)
+    const cosE = Math.max(0.1, Math.cos(E.el * D2R)), fAz = E.rAz * dt, fEl = E.rEl * dt;
+    const g = 1 - Math.exp(-(E.hasAim ? 7 : 0.9) * dt), vmax = (E.hasAim ? SLEW : 14) * dt;
+    let mAz = fAz + wrap180(tAz - E.az - fAz) * g, mEl = fEl + (tEl - E.el - fEl) * g;
+    const sp = Math.hypot(mAz * cosE, mEl); if (sp > vmax) { mAz *= vmax / sp; mEl *= vmax / sp; }   // ~60°/s turret limit
+    E.az = (E.az + mAz + 360) % 360; E.el = clamp(E.el + mEl, -5, 85);
+    E.err = Math.hypot(wrap180(tAz - E.az) * cosE, tEl - E.el);
+    // zoom: target ~35 % of the frame width, clamped 0.25°…20°; widen while slewing; open up on a hold to show the burst
+    let fT = E.fov;
+    if (E.hasTarget) fT = 2 * Math.atan(E.size / FRAC / 2 / Math.max(30, E.rangeM)) / D2R;
+    else if (E.holding) fT = E.holdFov;
+    else if (E.idleT > IDLE_S) fT = FOV_IDLE;
+    E.slewing = E.hasTarget && E.err > E.fov * 0.45;
+    if (E.hasTarget && E.err > E.fov * 0.3) fT = Math.max(fT, Math.min(FOV_MAX, E.err * 2.4));
+    fT = clamp(fT, FOV_MIN, FOV_MAX);
+    E.fov = Math.exp(Math.log(E.fov) + (Math.log(fT) - Math.log(E.fov)) * (1 - Math.exp(-dt * (fT > E.fov ? 4 : 2.2))));
+    E.inRange = !E.hasAim || E.rangeM <= R;
+    E.rangeKm = E.hasAim ? E.rangeM / 1000 : 0;
+    // pose (+ a little servo hunting while locked)
+    const ce = Math.cos(E.el * D2R);
+    E.dir.set(Math.sin(E.az * D2R) * ce, Math.sin(E.el * D2R), -Math.cos(E.az * D2R) * ce);
+    const aspect = E.swapped ? E.rectS.w / Math.max(1, E.rectS.h) : 4 / 3, th = Math.tan(E.fov * D2R / 2), tv2 = th / aspect;
+    E.cosCone = Math.cos(Math.min(1.5, Math.atan(Math.hypot(th, tv2)) * 1.6 + 0.001));
+    const hunt = E.hasTarget && !E.slewing ? E.fov * D2R * 0.012 : 0;
+    const jAz = (Math.sin(time * 2.3) + 0.6 * Math.sin(time * 5.1 + 1.3)) * hunt, jEl = (Math.sin(time * 1.9 + 0.7) + 0.5 * Math.sin(time * 4.4)) * hunt;
+    _eoV.set(Math.sin(E.az * D2R + jAz) * ce, Math.sin(E.el * D2R + jEl), -Math.cos(E.az * D2R + jAz) * ce);
+    const C = E.cam; C.position.copy(E.pos); C.aspect = aspect; C.fov = 2 * Math.atan(tv2) / D2R; C.updateProjectionMatrix();
+    C.lookAt(E.pos.x + _eoV.x * 1000, E.pos.y + _eoV.y * 1000, E.pos.z + _eoV.z * 1000); C.updateMatrixWorld();
+    // tracking gate: the target's box projected into the EO frame (0..1, top-left origin)
+    E.gateOn = false;
+    if (E.hasTarget && E.inRange) {
+      _eoV.copy(E.aim).project(C);
+      if (_eoV.z < 1 && Math.abs(_eoV.x) < 1.2 && Math.abs(_eoV.y) < 1.2) {
+        const ang = Math.atan(E.size * 0.62 / Math.max(1, E.rangeM)), gw = Math.max(0.09, Math.tan(ang) / th), gh = Math.max(0.09 * aspect, Math.tan(ang) / tv2);
+        const g = E.gate; g.w = Math.min(0.9, gw); g.h = Math.min(0.9, gh); g.x = (_eoV.x + 1) / 2 - g.w / 2; g.y = (1 - _eoV.y) / 2 - g.h / 2; E.gateOn = true;
+      }
+    }
+    // fog for the EO pass: out to the EO range, fading into the sky right behind the target (IR: a cold grey sky)
+    E.fogNear = R * 0.45; E.fogFar = R * 1.35;   // haze on the way out to R; beyond R the target is not drawn at all (OUT OF RANGE)
+    if (ir) { const t = (ENV.night ? 0.07 : 0.11) + 0.12 * (1 - clamp(E.el / 20, 0, 1)); E.bg.setRGB(t, t, t); }
+    else skyAt(Math.max(0, E.el), E.bg);
+    const fT2 = E.hasAim ? clamp((E.rangeM - E.fogNear) / (E.fogFar - E.fogNear), 0, 0.85) : 0;
+    E.dehaze = 1 + (ir ? 1.5 : 1.8) * fT2;      // the tracker's auto-contrast on the target range
+  }
+  function eoHotSwap(o, list) {               // IR: opaque airframe meshes → the hot material (restored after the pass)
+    if (!o.visible) return;
+    if (o.isMesh && o.material && (Array.isArray(o.material) || !o.material.transparent)) { list.push(o, o.material); o.material = eo.hot; }
+    for (let i = 0; i < o.children.length; i++) eoHotSwap(o.children[i], list);
+  }
+  const eoSwapList = [], eoLod = [], eoHideVis = [], eoGrassVis = [], _eoFog = { near: 0, far: 0, color: new THREE.Color(), clear: new THREE.Color(), alpha: 1, hs: new THREE.Color(), hg: new THREE.Color(), hi: 0, sc: new THREE.Color(), si: 0, cc: new THREE.Color() };
+  function eoPass(w, h) {
+    const R = renderer, E = eo, PR = R.getPixelRatio(), rw = Math.max(2, Math.round(w * PR)), rh = Math.max(2, Math.round(h * PR));
+    if (E.rt.width !== rw || E.rt.height !== rh) E.rt.setSize(rw, rh);
+    const ir = E.mode === 'IR', ENV = env.cur || {}, F = _eoFog;
+    // --- pass state
+    for (let i = 0; i < eoHide.length; i++) { eoHideVis[i] = eoHide[i].visible; eoHide[i].visible = false; }
+    for (let i = 0; i < grassLayers.length; i++) { eoGrassVis[i] = grassLayers[i].mesh.visible; grassLayers[i].mesh.visible = false; }
+    const shelterVis = shelter.visible, rainVis = rain.ls.visible, skyVis = skyGroup.visible;
+    shelter.visible = false; rain.ls.visible = false;
+    const noGround = E.el - E.cam.fov / 2 > 6.5;          // looking well above the hills (≤ ~6° from the turret): skip the terrain
+    if (noGround) { terrainMesh.visible = false; farGround.mesh.visible = false; }
+    eoLod.length = 0;
+    for (let i = 0; i < eoActN; i++) { const a = eoAct[i]; eoLod.push(a.root.visible, a.useLo); a.root.visible = true; setLod(a, false); }
+    F.near = scene.fog.near; F.far = scene.fog.far; F.color.copy(scene.fog.color); R.getClearColor(F.clear); F.alpha = R.getClearAlpha();
+    scene.fog.near = U.fogNear.value = E.fogNear; scene.fog.far = U.fogFar.value = E.fogFar;
+    scene.fog.color.copy(E.bg); U.fogColor.value.copy(E.bg); R.setClearColor(E.bg, 1);
+    const sc0 = U.scale.value; U.scale.value = rh / (2 * Math.tan(E.cam.fov * D2R / 2)); U.pass.value = 1; U.ir.value = ir ? 1 : 0;
+    EOT.uEOClip.value = E.hasAim ? 1 : 0; EOT.uEOCam.value.copy(E.pos); EOT.uEOTgt.value.copy(E.aim);
+    EOT.uEOW.value.set(1300, Math.tan(E.fov * D2R) * 1.2); EOT.uEOH.value = 0.55 * Math.tan(E.cam.fov * D2R / 2);
+    eoSwapList.length = 0;
+    if (ir) {
+      skyGroup.visible = false;
+      F.hs.copy(hemi.color); F.hg.copy(hemi.groundColor); F.hi = hemi.intensity; F.sc.copy(sun.color); F.si = sun.intensity;
+      hemi.color.setRGB(1, 1, 1); hemi.groundColor.setRGB(0.42, 0.42, 0.42); hemi.intensity = ENV.night ? 0.6 : 0.8;
+      sun.color.setRGB(1, 1, 1); sun.intensity = ENV.night ? 0.1 : 0.3;
+      if (cloudDeck) { F.cc.copy(cloudDeck.material.color); cloudDeck.material.color.multiplyScalar(0.5); }   // the deck reads cool
+      for (let i = 0; i < eoActN; i++) eoHotSwap(eoAct[i].root, eoSwapList);
+      for (const id in flights) { const f = flights[id]; if (eoSees(f.pos.x, f.pos.y, f.pos.z)) eoHotSwap(f.m, eoSwapList); }
+      for (const d of debris) if (d.on) eoHotSwap(d.o, eoSwapList);
+    }
+    R.setRenderTarget(E.rt);
+    R.render(scene, E.cam);
+    R.setRenderTarget(null);
+    // --- restore
+    for (let i = 0; i < eoSwapList.length; i += 2) eoSwapList[i].material = eoSwapList[i + 1];
+    eoSwapList.length = 0;
+    if (ir) { if (cloudDeck) cloudDeck.material.color.copy(F.cc); skyGroup.visible = skyVis; hemi.color.copy(F.hs); hemi.groundColor.copy(F.hg); hemi.intensity = F.hi; sun.color.copy(F.sc); sun.intensity = F.si; }
+    EOT.uEOClip.value = 0;
+    U.scale.value = sc0; U.pass.value = 0; U.ir.value = 0;
+    scene.fog.near = U.fogNear.value = F.near; scene.fog.far = U.fogFar.value = F.far; scene.fog.color.copy(F.color); U.fogColor.value.copy(F.color); R.setClearColor(F.clear, F.alpha);
+    for (let i = 0; i < eoActN; i++) { const a = eoAct[i]; a.root.visible = eoLod[i * 2]; if (eoLod[i * 2 + 1] !== null) setLod(a, eoLod[i * 2 + 1]); }
+    shelter.visible = shelterVis; rain.ls.visible = rainVis;
+    if (noGround) { terrainMesh.visible = true; farGround.mesh.visible = true; }
+    for (let i = 0; i < eoHide.length; i++) eoHide[i].visible = eoHideVis[i];
+    for (let i = 0; i < grassLayers.length; i++) grassLayers[i].mesh.visible = eoGrassVis[i];
+    // post uniforms
+    const u = E.post.mat.uniforms;
+    u.uRes.value.set(rw, rh); u.uIR.value = ir ? 1 : 0; u.uTime.value = time; u.uDehaze.value = E.dehaze; u.uBg.value.copy(E.bg);
+    // TV auto-gain: expose for the sky behind the target (dusk lifts, night runs out of gain → noisy, poor picture)
+    const nightTV = !ir && ENV.night, bl = Math.max(0.02, E.bg.r * 0.299 + E.bg.g * 0.587 + E.bg.b * 0.114);
+    u.uGain.value = ir ? 1 : clamp(0.52 / bl, 0.85, nightTV ? 3 : 1.8); u.uNoise.value = nightTV ? 0.2 : ir ? 0.07 : 0.05 + 0.03 * clamp(u.uGain.value - 1, 0, 1);
+  }
+  function stat(o, c0, t0) { const r = renderer.info.render; o.calls = r.calls - c0; o.tris = r.triangles - t0; }
+  // all passes of one frame. V1.4: world (scissored to the cabin windows) → EO pass into its render target → the cabin on top
+  // (its EO monitor face samples the target through the post shader). Swapped: EO pass → cabin → EO post over the view
+  // above the radar monitor. Title / chase camera: the world only.
+  function renderFrame() {
+    const R = renderer, I = R.info.render, E = eo, S = E.stats, W = E.W, H = E.H, cabOn = !!(cab && shelter.visible);
+    R.info.reset();
+    S.eo.calls = S.eo.tris = S.post.calls = S.post.tris = S.cab.calls = S.cab.tris = 0;
+    if (!cabOn) { R.setScissorTest(false); R.setViewport(0, 0, W, H); R.render(scene, camera); stat(S.main, 0, 0); return; }
+    let c0 = 0, t0 = 0;
+    const u = E.post.mat.uniforms; u.uOn.value = E.on ? 1 : 0;
+    if (E.on && E.swapped) {
+      const r = E.rectS;
+      eoPass(r.w, r.h); stat(S.eo, c0, t0); c0 = I.calls; t0 = I.triangles;
+      R.setScissorTest(false); R.setViewport(0, 0, W, H);
+      R.render(cabScene, camera); stat(S.cab, c0, t0); c0 = I.calls; t0 = I.triangles;
+      R.setViewport(r.x, H - r.y - r.h, r.w, r.h); R.setScissor(r.x, H - r.y - r.h, r.w, r.h); R.setScissorTest(true);
+      R.render(E.post.scene, E.post.cam); stat(S.post, c0, t0);
+      S.main.calls = S.main.tris = 0;
+    } else {
+      const Wn = Q.win;
+      R.setScissorTest(false); R.setViewport(0, 0, W, H);
+      if (Wn.full) R.render(scene, camera);
+      else {
+        R.clear();
+        if (Wn.w > 0) { R.setScissor(Wn.x, H - Wn.y - Wn.h, Wn.w, Wn.h); R.setScissorTest(true); R.autoClear = false; R.render(scene, camera); R.autoClear = true; R.setScissorTest(false); }
+      }
+      stat(S.main, c0, t0); c0 = I.calls; t0 = I.triangles;
+      if (E.on) { eoPass(E.rectN.w, E.rectN.h); stat(S.eo, c0, t0); c0 = I.calls; t0 = I.triangles; }
+      R.setRenderTarget(null); R.setScissorTest(false); R.setViewport(0, 0, W, H);
+      R.autoClear = false; R.clearDepth(); R.render(cabScene, camera); R.autoClear = true; stat(S.cab, c0, t0);
+    }
+    R.setScissorTest(false); R.setViewport(0, 0, W, H);
+  }
+  const eoState = { on: false, swapped: false, mode: 'TV', auto: true, targetId: null, trackId: null, hasTarget: false, holding: false, inRange: true,
+    rangeKm: 0, brgDeg: 0, elDeg: 0, fovDeg: FOV_IDLE, zoom: 1, gate: null, rect: null, slewing: false, status: 'NO TRACK', event: null, kind: null };
+  const eoApi = {
+    get state() {
+      const E = eo, s = eoState;
+      s.on = E.on; s.swapped = E.swapped; s.mode = E.mode; s.auto = !E.manual; s.targetId = E.tgtId; s.trackId = E.trackId; s.kind = E.kind;
+      s.hasTarget = E.hasTarget; s.holding = E.holding; s.inRange = E.inRange; s.slewing = E.slewing;
+      s.rangeKm = +E.rangeKm.toFixed(2); s.brgDeg = +E.az.toFixed(1); s.elDeg = +E.el.toFixed(2); s.fovDeg = +E.fov.toFixed(3);
+      s.zoom = +(FOV_MAX / E.fov).toFixed(1); s.gate = E.gateOn ? E.gate : null; s.rect = E.swapped ? E.rectS : Q.okE ? E.rectL : E.rectN; s.event = E.event;
+      s.status = !E.on ? 'OFF' : E.holding ? 'HOLD' : !E.hasTarget ? 'NO TRACK' : !E.inRange ? 'OUT OF RANGE' : E.slewing ? 'SLEWING' : 'TRACK';
+      return s;
+    },
+    setMode(m) { m = String(m || '').toUpperCase(); eo.manual = m === 'TV' || m === 'IR' ? m : null; if (eo.on) eo.mode = eo.manual || eo.mode; return eo.manual || 'AUTO'; },
+    toggleSwap() { if (!eo.on) return false; eo.swapped = !eo.swapped; return eo.swapped; },
+    get swapped() { return eo.swapped; }
+  };
+
   /* ---------------- API ---------------- */
   const api = {
+    eo: eoApi,
     setTitle, titleLaunch, titleProbe, get titleOn() { return title.on; }, get titleT() { return title.t; },
+    follow, get following() { return chase.mode === 'follow' || chase.mode === 'hold' ? chase.id : null; },
     init({ canvas, models: mdl }) {
       models = mdl || RS.models;
-      // logarithmic depth: the view spans 0.3 m (shelter frame) to 9 km (hills) — linear depth z-fights at both ends
+      // logarithmic depth: the view spans 5 cm (cabin console) to 30 km (far ground) — linear depth z-fights at both ends
       renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', logarithmicDepthBuffer: true });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
       renderer.shadowMap.enabled = false;
+      renderer.info.autoReset = false;         // V1.3: several passes per frame — renderFrame() resets once, so info = the frame total
       try { const gl = renderer.getContext(), r = gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE); if (r && r[1]) U.maxPx.value = Math.min(512, r[1]); } catch (e) { /* ignore */ }
       scene = new THREE.Scene();
       scene.fog = new THREE.Fog(0x8a5a4a, 1200, 5200);
-      camera = new THREE.PerspectiveCamera(50, 1, 0.3, 12000);
+      camera = new THREE.PerspectiveCamera(50, 1, 0.05, 32000);  // far ground reaches ~30 km from the chase camera
+      seatCam = new THREE.PerspectiveCamera(50, 1, 0.05, 100);   // the seat's rest pose (screen layout)
 
       hemi = new THREE.HemisphereLight(0x8a90b0, 0x2a2618, 0.75); scene.add(hemi);
       sun = new THREE.DirectionalLight(0xffc49a, 0.9); sun.position.set(-3000, 1200, 2000); scene.add(sun);
@@ -1092,6 +1892,8 @@
 
       buildSky();
       buildTerrain();
+      buildFarGround();
+      buildCloudDeck();
       buildTrees(400);
       buildGrass();
       smoke = new PSys(3200, texPuff(), false, 1.5, 1, 3);
@@ -1103,10 +1905,15 @@
       const dproto = models.create('debris', { placeholder: true });
       for (let i = 0; i < 14; i++) { const o = cloneBare(dproto); o.visible = false; scene.add(o); debris.push({ o, on: false, v: new V3(), w: new V3(), t: 0, k: 1 }); }
 
-      shelter = models.create('shelter_interior');
-      shelter.rotation.y = yawFor(VIEW_BRG);
-      shelter.position.y = heightAt(0, 0);
-      scene.add(shelter);
+      // V1.4: the Pantsir operator cabin replaces the hatch shelter (same place, facing VIEW_BRG), in its own scene
+      cab = RS.cabin.model(THREE);
+      cabScene = new THREE.Scene(); cabScene.add(cab.group);
+      { const [fx, fz] = dirOf(VIEW_BRG); cab.group.position.set(-fx * 0.45, heightAt(0, 0) + EYE, -fz * 0.45); }
+      cab.group.rotation.y = -VIEW_BRG * D2R;              // cabin −Z (forward) → bearing VIEW_BRG
+      cab.group.updateMatrixWorld(true);
+      cab.q0 = cab.group.quaternion.clone(); cab.p0 = cab.group.position.clone();   // rest pose (the sway rocks around it)
+      shelter = cab.group;
+      eoBuild();
 
       applyEnv();
       onBus();
@@ -1118,10 +1925,10 @@
     resize(w, h) {
       if (!renderer) return;
       renderer.setSize(w, h, false);
-      camera.aspect = w / Math.max(1, h);
-      camera.fov = title.on ? (camera.aspect < 1 ? 56 : 42) : camera.aspect < 1 ? 62 : 50;
-      camera.updateProjectionMatrix();
+      if (title.on) { camera.aspect = w / Math.max(1, h); camera.fov = camera.aspect < 1 ? 56 : 42; camera.clearViewOffset(); camera.updateProjectionMatrix(); }
+      else seatProj(camera, w, h);
       U.scale.value = h * renderer.getPixelRatio() / (2 * Math.tan(camera.fov * D2R / 2));
+      eoLayout(w, h);
     },
 
     render(dt, state) {
@@ -1133,27 +1940,35 @@
       lastState = state;
       if (state && state.t !== simT) { simT = state.t; simAge = 0; } else simAge += dt;
       grassGust = Math.max(0, grassGust - dt * 0.8);
-      grassU.uTime.value = time; if (sun) grassU.uSun.value.copy(sun.color).multiplyScalar(sun.intensity * clamp(1.3 - 1.2 * sun.position.y / Math.max(1, sun.position.length()), 0.15, 1));   // tips glow most with a low sun
-      grassU.uWind.value = (env.evStorm || env.weather === 'storm' ? 2.2 : 1) + grassGust;
-      // seated camera, hatch-facing, tiny idle sway + shake
-      const [fx, fz] = dirOf(VIEW_BRG), [rx, rz] = dirOf(VIEW_BRG + 90);
-      const sway = Math.sin(time * 0.7) * 0.015, bob = Math.sin(time * 0.43) * 0.008;
+      grassU.uTime.value = time; if (sun) grassU.uSunDir.value.copy(sun.position).normalize(); if (sun) grassU.uSun.value.copy(sun.color).multiplyScalar(sun.intensity * clamp(1.3 - 1.2 * sun.position.y / Math.max(1, sun.position.length()), 0.15, 1));   // tips glow most with a low sun
+      grassU.uWind.value = (env.cur && env.cur.storm ? 2.2 : env.cur && env.cur.wet ? 1.6 : 1) + grassGust;
+      // seated in the cabin: rest pose + drag look-around (RS.cabin.look, springs home) + subtle head sway + launch shake
       shakeT = Math.max(0, shakeT - dt * 1.4);
       const sk = shakeT * shakeT, sh1 = (Math.sin(time * 61) + Math.sin(time * 37.3)) * 0.5 * sk, sh2 = (Math.sin(time * 53.7) + Math.sin(time * 29.1)) * 0.5 * sk;
       if (title.on) titleCam(sh1, sh2);
       else {
-      camera.position.set(-fx * 0.45 + rx * (sway + sh1 * 0.03), heightAt(0, 0) + EYE + bob + sh2 * 0.03, -fz * 0.45 + rz * (sway + sh1 * 0.03));
-      const lb = VIEW_BRG + Math.sin(time * 0.21) * 0.6 + sh1 * 1.6, [lx, lz] = dirOf(lb);
-      camera.lookAt(camera.position.x + lx * 100, camera.position.y + 100 * Math.tan((PITCH + sh2 * 1.2) * D2R), camera.position.z + lz * 100);
+        RS.cabin.setEnabled(!eo.swapped && !chase.mode);
+        const L = RS.cabin.frame(dt);
+        // sway = the vehicle rocking on its suspension: cabin + seat move together against the world, so the DOM screens stay put
+        // (crisp, stable taps) while the view out of the windshield drifts; launch shake / look-around move the head in the cabin
+        const g = cab.group;
+        _se.set(Math.sin(time * 0.33) * 0.0016, Math.sin(time * 0.21) * 0.0022, Math.sin(time * 0.27) * 0.0024, 'YXZ'); _sq.setFromEuler(_se);
+        g.quaternion.copy(cab.q0).multiply(_sq);
+        g.position.set(cab.p0.x, cab.p0.y + Math.sin(time * 0.43) * 0.004, cab.p0.z); g.updateMatrixWorld(true);
+        seatPose(camera, L.yaw + sh1 * 1.2, L.pitch + sh2 * 0.9, sh1 * 0.5, sh1 * 0.012, sh2 * 0.012);
       }
+      if (chase.mode) updateChase(dt, state);
       camera.updateMatrixWorld();
+      const W = state && state.weather;   // the sim's weather (set at startShift) wins if it differs from what we show
+      if (W && !title.on && (W.time !== env.wt || W.sky !== env.ws || W.visKm !== env.wv)) { env.wt = W.time; env.ws = W.sky; env.wv = W.visKm; envFromWeather(W); applyEnv(); }
 
       updateRadars(dt, state);
       updateBattery(dt, state);
       if (gun) updateGun(dt, state);
 
       // truth entities near the battery
-      const vis = (state && state.visible) || [], seen = {}, cam = camera.position, night = env.cur && env.cur.night;
+      const vis = (state && state.visible) || [], seen = {}, cam = camera.position, night = env.cur && env.cur.night, vm = visM();
+      eoActN = 0;
       for (const v of vis) {
         if (v.kind === 'missile_lance' || v.kind === 'missile_dart') {
           seen[v.id] = 1;
@@ -1175,27 +1990,35 @@
         const x = v.x * 1000 + Math.sin(h) * spd * age, z = -v.y * 1000 - Math.cos(h) * spd * age;
         const y = Math.max(v.alt + (a.vy || 0) * age, heightAt(x, z) + 5);
         a.root.position.set(x, y, z);
-        const dist = a.root.position.distanceTo(cam), far = dist > FAR_AIR;
+        const dist = a.root.position.distanceTo(cam), far = dist > FAR_AIR, seenFar = dist < vm;   // beyond visual range: not drawn at all
+        const inEO = eoSees(x, y, z);         // V1.3: in the tracker's view — full model + true-size effects for the EO pass
         a.root.visible = !far;
         if (!far) setLod(a, a.useLo ? dist > 1400 : dist > 1600);
+        if (inEO && eoActN < 16) eoAct[eoActN++] = a;
         a.bank += (clamp((a.turn || 0) * 0.06, -1.1, 1.1) - a.bank) * Math.min(1, dt * 3);
         a.pitch += (Math.atan2(a.vy || 0, Math.max(40, spd)) - a.pitch) * Math.min(1, dt * 3);
         a.root.rotation.set(-a.pitch, yawFor(v.hdg), a.bank);
         const mdl = a.useLo ? a.lo : a.hi, rotor = mdl && mdl.userData.rotor; if (rotor && !far) rotor.rotation.y += dt * 30;
+        if (inEO && a.hi && a.hi !== mdl && a.hi.userData.rotor) a.hi.userData.rotor.rotation.y += dt * 30;
         // legibility dot (min 1.5 px) + night nav lights
-        const P = a.root.position;
-        if (far) { const q = fxPos(P.x, P.y, P.z); farSys.spawn(q.x, q.y, q.z, 0, 0, 0, FX.farDot, 1); }
+        const P = a.root.position, navOk = night && v.kind !== 'cruise_missile' && v.kind !== 'arm_missile';
+        LAY = inEO ? 1 : 0;                   // hatch-only stand-ins while the EO shows this one close up
+        if (far) { if (seenFar) { const q = fxPos(P.x, P.y, P.z); farSys.spawn(q.x, q.y, q.z, 0, 0, 0, FX.farDot, 1); } }
         else if (dist > 900) smoke.spawn(P.x, P.y, P.z, 0, 0, 0, FX.dot, 1);
-        if (night && far && v.kind !== 'cruise_missile' && v.kind !== 'arm_missile') {   // distant: one blinking light
+        if (night && far && !seenFar) { /* too far to see */ }
+        else if (navOk && far) {              // distant: one blinking light
           const q = fxPos(P.x, P.y, P.z);
           glow.spawn(q.x, q.y, q.z, 0, 0, 0, (time + (idHash(v.id) % 10) / 10) % 1.2 < 0.15 ? FX.navW : FX.navR, 1);
-        } else if (night && v.kind !== 'cruise_missile' && v.kind !== 'arm_missile') {
+        }
+        LAY = far ? 2 : 0;
+        if (navOk && (!far || inEO)) {        // close (or in the EO's close-up): wingtip lights + strobe
           a.root.updateMatrixWorld();
           const span = v.kind === 'transport' ? 18 : v.kind.indexOf('helo') === 0 ? 2 : 6;
           _v.set(span, 0, 0).applyMatrix4(a.root.matrixWorld); glow.spawn(_v.x, _v.y, _v.z, 0, 0, 0, FX.navR, 1);
           _v.set(-span, 0, 0).applyMatrix4(a.root.matrixWorld); glow.spawn(_v.x, _v.y, _v.z, 0, 0, 0, FX.navG, 1);
           if ((time + (idHash(v.id) % 10) / 10) % 1.2 < 0.1) glow.spawn(P.x, P.y + 1.5, P.z, 0, 0, 0, FX.navW, 1.5);
         }
+        LAY = 0;
         // contrails above 5 km, smoke from burning / missile exhaust glow
         a.trailT -= dt;
         if (a.trailT <= 0) {
@@ -1207,19 +2030,39 @@
             smoke.spawn(P.x + _v.x * back, P.y, P.z + _v.z * back, 0, 1, 0, FX.dark, 0.6);
           } else if (y > 5000 && /jet|transport|strike/.test(v.kind)) {
             const sx = Math.cos(h) * 3;
-            if (far) {                     // pulled in along the view ray, angular size kept, light fog
+            if (far && seenFar) {          // pulled in along the view ray, angular size kept, light fog
+              LAY = inEO ? 1 : 0;
               const q = fxPos(P.x + _v.x * back, P.y, P.z + _v.z * back);
               farSys.spawn(q.x, q.y, q.z, 0, 0, 0, FX.farTrail, q.k);
-            } else {
+            }
+            if (!far || inEO) {            // true contrails (the EO's close-up gets them at any range)
+              LAY = far ? 2 : 0;
               smoke.spawn(P.x + _v.x * back + sx, P.y, P.z + _v.z * back + Math.sin(h) * 3, 0, 0, 0, FX.contrail, 1);
               smoke.spawn(P.x + _v.x * back - sx, P.y, P.z + _v.z * back - Math.sin(h) * 3, 0, 0, 0, FX.contrail, 1);
             }
+            LAY = 0;
           }
         }
-        if (v.kind === 'arm_missile' || v.kind === 'cruise_missile') glow.spawn(P.x + _v.x * 3, P.y, P.z + _v.z * 3, 0, 0, 0, FX.motor, v.kind === 'arm_missile' ? 1 : 0.4);
+        if (inEO && eo.mode === 'IR' && !v.burning && v.kind !== 'cruise_missile' && v.kind !== 'arm_missile') {   // IR: hot tailpipe
+          const tb = v.kind === 'transport' ? 14 : v.kind.indexOf('helo') === 0 ? 2 : 7;
+          LAY = 2; glow.spawn(P.x - Math.sin(h) * tb, P.y + (tb === 2 ? 1.2 : 0), P.z + Math.cos(h) * tb, 0, 0, 0, FX.heat, v.kind === 'transport' ? 1.5 : 1); LAY = 0;
+        }
+        // (V1.3 fix: from the heading — _v may hold a camera ray from fxPos here, which threw far motors kilometres off)
+        if (v.kind === 'arm_missile' || v.kind === 'cruise_missile') glow.spawn(P.x - Math.sin(h) * 3, P.y, P.z + Math.cos(h) * 3, 0, 0, 0, FX.motor, v.kind === 'arm_missile' ? 1 : 0.4);
       }
       for (const id in actors) if (!seen[id]) removeActor(id);
       for (const id in flights) if (!seen[id]) updateFlight(flights[id], null, dt);
+      // the chase camera was placed before the flights moved (so LOD / far fx use it): re-anchor on where the round really is now
+      if (chase.anchored) {
+        const f = flights[chase.id];
+        if (f) { _w.subVectors(f.pos, chase.anchor); chase.pos.add(_w); chase.lastCam.add(_w); chase.last.copy(f.pos); camera.position.addScaledVector(_w, chase.w); camera.updateMatrixWorld(); }
+        chase.anchored = false;
+      }
+      eoUpdate(dt, state);                   // V1.3: the tracker slews/zooms onto the selected track (actors are placed by now)
+      skyGroup.position.copy(camera.position);
+      updateFarGround(camera.position.x, camera.position.z);
+      updateCloudDeck(dt);
+      fogFor(chase.mode ? chase.fog : 0);
 
       // night work lights on the TELs (camera-facing glows on the mast tops)
       if (night) for (const id in tels) { const o = tels[id].obj.position; glow.spawn(o.x, o.y + 4.6, o.z, 0, 0, 0, FX.work, 1); }
@@ -1228,9 +2071,13 @@
         const e = emitters[i]; if (time > e.until) { emitters.splice(i, 1); continue; }
         e.acc += dt * e.rate;
         while (e.acc >= 1) {
-          e.acc -= 1; const q = fxPos(e.x + (Math.random() - 0.5) * 6 * e.k, e.y, e.z + (Math.random() - 0.5) * 6 * e.k);
-          smoke.spawn(q.x, q.y, q.z, (Math.random() - 0.5) * 2 * q.k, (e.o === FX.column ? 24 : 5) * q.k, 2 * q.k, e.o, e.k * q.k);
-          if (Math.random() < 0.4) glow.spawn(q.x, q.y, q.z, 0, 1.5 * q.k, 0, FX.fire, 0.6 * e.k * q.k);
+          e.acc -= 1; const ex = e.x + (Math.random() - 0.5) * 6 * e.k, ez = e.z + (Math.random() - 0.5) * 6 * e.k, q = fxPos(ex, e.y, ez);
+          const two = q.k < 1 && eoSees(ex, e.y, ez), vx = (Math.random() - 0.5) * 2, vy = e.o === FX.column ? 24 : 5, fire = Math.random() < 0.4;
+          LAY = two ? 1 : 0;
+          smoke.spawn(q.x, q.y, q.z, vx * q.k, vy * q.k, 2 * q.k, e.o, e.k * q.k);
+          if (fire) glow.spawn(q.x, q.y, q.z, 0, 1.5 * q.k, 0, FX.fire, 0.6 * e.k * q.k);
+          if (two) { LAY = 2; smoke.spawn(ex, e.y, ez, vx, vy, 2, e.o, e.k); if (fire) glow.spawn(ex, e.y, ez, 0, 1.5, 0, FX.fire, 0.6 * e.k); }
+          LAY = 0;
         }
       }
       updateThrown(dt);
@@ -1239,8 +2086,11 @@
       flashT = Math.max(0, flashT - dt * 3);
       flashLight.intensity = flashT * (env.cur && env.cur.night ? 6 : 2.5);
       smoke.update(dt); glow.update(dt); flare.update(dt); farSys.update(dt); updateTracers(dt);
-      renderer.render(scene, camera);
+      if (cab) { camera.updateMatrixWorld(); cabinQuads(); if (shelter.visible) cabinLight(); }
+      renderFrame();
+      if (RS.cabin) RS.cabin.update();         // DOM screens follow this frame's camera
     },
+    screenQuad,
 
     heightAt,
     launcherPos(id) {
@@ -1249,23 +2099,29 @@
       return { x: L.x, y: L.y + (HEIGHT_FOR[id] || 3), z: L.z };
     },
     listener() {
-      const p = camera ? camera.position : { x: 0, y: heightAt(0, 0) + EYE, z: 0 };
+      // audio stays at the hatch while the kill cam rides a missile (no doppler weirdness, you hear it from the site)
+      const p = camera && !chase.mode ? camera.position : { x: 0, y: heightAt(0, 0) + EYE, z: 0 };
       return { pos: { x: p.x, y: p.y, z: p.z }, headingDeg: VIEW_BRG };
     },
     setEnv(o) {
       o = o || {};
-      if (o.time && PRESETS[o.time]) env.time = o.time;
-      if (o.weather === 'clear' || o.weather === 'storm') env.weather = o.weather;
+      if (o.time && PRESETS[o.time] && o.time !== 'ember') env.time = o.time;
+      if (o.sky && VIS_KM[o.sky]) { env.sky = o.sky; if (!o.weather) env.weather = 'clear'; }
+      if (o.weather === 'clear' || o.weather === 'storm') env.weather = o.weather;   // old alias: storm = rain + lightning
+      if (o.visKm !== undefined) env.visKm = +o.visKm > 0 ? +o.visKm : 0;
       if (scene) applyEnv();
-      return { time: env.time, weather: env.weather };
+      return { time: env.time, sky: env.sky, weather: env.weather, visKm: env.cur ? env.cur.visKm : 0 };
     },
-    shake(i) { shakeT = clamp(Math.max(shakeT, (+i || 0) * (REDUCED ? 0.5 : 1)), 0, 1); },
+    shake(i) { if (chase.mode) return; shakeT = clamp(Math.max(shakeT, (+i || 0) * (REDUCED ? 0.5 : 1)), 0, 1); },
     // test/debug helpers
     debug: {
       get renderer() { return renderer; }, get scene() { return scene; }, get camera() { return camera; },
       get tels() { return tels; }, get flights() { return flights; }, get actors() { return actors; },
       particles() { return { smoke: smoke.n, glow: glow.n, flare: flare.n }; },
-      get env() { return env.cur; }, get quality() { return { level: perf.level, grass: grassMesh ? grassMesh.count : 0, grassFull }; }, get grassMesh() { return grassMesh; }, get radars() { const y = o => o && o.userData.head ? +o.userData.head.rotation.y.toFixed(2) : null; return { search: y(radar), fc: y(ground.FC), la: y(ground.LA), gunRadar: gun && gun.userData.searchRadar ? +gun.userData.searchRadar.rotation.y.toFixed(2) : null }; }, get shakeT() { return shakeT; },
+      clearFx() { smoke.n = glow.n = flare.n = farSys.n = 0; emitters.length = 0; for (const d of debris) { d.on = false; d.o.visible = false; } },   // screenshots: a clean sky
+      get eo() { return eo; }, eoSees,
+      get cabin() { return cab ? { group: cab.group, scene: cabScene, tris: cab.tris, quads: Q, stats: eo.stats.cab, rectN: eo.rectN, rectS: eo.rectS } : null; },
+      get env() { return env.cur; }, get chase() { return { id: chase.id, mode: chase.mode, t: chase.t }; }, get farGround() { return farGround; }, get cloudDeck() { return cloudDeck; }, get shelter() { return shelter; }, get quality() { return { level: perf.level, grass: grassLayers.reduce((a, L) => a + L.mesh.count, 0), grassFull }; }, get grassMesh() { return grassMesh; }, get radars() { const y = o => o && o.userData.head ? +o.userData.head.rotation.y.toFixed(2) : null; return { search: y(radar), fc: y(ground.FC), la: y(ground.LA), gunRadar: gun && gun.userData.searchRadar ? +gun.userData.searchRadar.rotation.y.toFixed(2) : null }; }, get shakeT() { return shakeT; },
       timeScale: 1                           // tests slow effects down to photograph them under software WebGL
     }
   };

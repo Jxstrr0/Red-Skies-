@@ -67,7 +67,8 @@ RS.RANDOM_EVENT = { RADAR_FAULT:'radar_fault', LAUNCHER_JAM:'launcher_jam', COMM
 RS.EV = ['SIM_TICK','TRACK_NEW','TRACK_LOST','TRACK_SELECTED','IFF_SENT','IFF_RESULT','CLASSIFIED','ASSIGNED',
   'LAUNCH','GUN_FIRE','INTERCEPT','MISS','KILL','FRATRICIDE','RELOAD_START','RELOAD_DONE','RADAR_STATE','RADAR_WARN',
   'JAMMING','ARM_INBOUND','ARM_IMPACT','ASSET_HIT','LEAKER','ROE_CHANGE','COMMS','ALARM','RANDOM_EVENT',
-  'SHIFT_START','SHIFT_END','UI_TAP','UI_FIRE_ARMED','FIRE_REJECTED','LOCK'];
+  'SHIFT_START','SHIFT_END','UI_TAP','UI_FIRE_ARMED','FIRE_REJECTED','LOCK','EVADE','RADAR_REPAIR','PAUSE',
+  'WAVE', 'MISSILE_ACTIVE','CAM_FOLLOW','TUTORIAL'];
 
 RS.bus = (function () {
   const map = {};
@@ -157,6 +158,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
        (reload refills a launcher from reserve; reserve 0 → cannot reload)
    state.battery.launchers[i] + { assignedTrack:string|null, reloadTotal:number }
    state.missiles[i] + { hdg, spd, phase:'boost'|'midcourse'|'terminal', tti:number (s to intercept, est.) }
+   V1.1.3: state.missiles[i].active:boolean — Lance seeker active (inside 20 km, latched): radar no longer needed for that round.
+   MISSILE_ACTIVE {missileId, targetId, weapon}  emitted once when a round goes active.
    state.gun = { firing:boolean, bearingDeg, elevDeg, targetId|null }
    state.radar + { armEta:number|null }        seconds until nearest ARM impact (null = none inbound)
    state.shift + { failed:boolean }
@@ -224,3 +227,67 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
    Grade (A–F) computed in meta from SHIFT_END.stats + state: asset hp, leakers, ammo efficiency (kills per round),
    reaction time, fratricide = F. Save: localStorage key 'redskies.v1' in try/catch → {campaign:{unlocked, results[], reserve}, settings}.
 */
+
+/* =====================================================================
+   v20 ADDITIONS. Additive only.
+   ===================================================================== */
+/* ---------- Hostile evasion (sim) ----------
+   Hostile jets hear an RWR warning when we LOCK them (reacts ~28 %) or when one of our SAMs in flight at them closes inside
+   30 km (Lance) / 16 km (Dart) (reacts ~66 %, once per missile, ≥ 3 s between reactions). Reactions (seeded, situational):
+     'break' — hard turn 60–150°: drag (turn away) when the round is > 12 km off, beam/notch (±90° to it) when closer; +10 % speed
+     'dive'  — descend at 120 m/s to 100–300 m (ground clutter: Pk ×0.85 while low); helo_hostile only dives (20–40 m, terrain mask)
+     'chaff' — terminal (round inside 3 km), 2 programmes per jet, 75 %: that missile's Pk ×0.7
+   A break can come with a dive. After 10–20 s the jet resumes its mission (strike run toward the asset, or egress).
+   Missile energy matters: coasting rounds bleed speed when they turn, lose Pk at low closing speed and fall short below
+   ~350 m/s — a max-range Lance at a dragging jet is a gamble; Darts inside ~10 km stay reliable.
+   EVADE        {trackId|null, missileId|null, kind:'break'|'dive'|'chaff'}   one event per reaction kind (break+dive → two)
+                trackId = our track id of the jet (null if untracked); missileId null = reaction to a LOCK spike
+   Track + { evade:'break'|'dive'|'chaff'|null }   most recent reaction, cleared ~6 s after it started
+   ---------- Radar repair (sim) ----------
+   RS.sim.cmd.repairRadar() -> boolean   allowed when radar.health < 0.95, shift running and not already repairing.
+       Forces the radar OFF (RADAR_STATE {on:false} if it was on); cmd.radar(true) returns false while repairing.
+       Duration 18 + 13·(1 − health) s (≈ 19–30 s). On completion health = 1, radar stays OFF (operator re-transmits).
+   state.radar + { repair:{until:simTime, total:seconds}|null, degraded:boolean (health < 0.7, kept up to date) }
+   RADAR_REPAIR {active:boolean, health}   active:true at start, active:false at completion (health then 1)
+       COMMS from BATTERY at start ('Radar cold for repairs, N seconds.', normal) and completion
+       ('Radar repaired. Transmit when ready.', high).
+   ---------- UI events ----------
+   PAUSE        {paused:boolean}          emitted by main.js on RS.main.pause()/resume() (audio/voice go quiet while paused) */
+
+
+/* =====================================================================
+   V1.1.0.0 ADDITIONS. Additive only.
+   ===================================================================== */
+/* ---------- Weather (sim) ----------
+   ShiftDef + weather?:{ time:'dawn'|'day'|'dusk'|'night', sky:'clear'|'overcast'|'rain' }   (absent → {dusk, clear})
+   state.weather = { time, sky (as defined), visKm, storm:boolean (STORM event active), nightEv:boolean (NIGHT event active) }
+       visKm: clear 15, overcast 11, rain 6 (STORM counts as rain); night (time or event) halves it, min 3.
+   Rain (sky 'rain' or storm): radar Pd ×0.8 for RCS < 0.3, a little more track position noise, Harrow Pk ×0.85.
+   Overcast / night: no sim effect. No new event (SHIFT_START.def carries weather; RANDOM_EVENT still flags night/storm).
+   RS.content.makeFreeShift(seed, diff, opts?) → def.weather; opts.weather {time?, sky?} ('random'/absent → seeded pick:
+       time dusk .3 day .3 dawn .2 night .2; sky clear .55 overcast .3 rain .15). RS.content.pickWeather(seed, want?) same pick.
+   Campaign shifts carry a fixed weather (C3 Storm Front = rain).
+   ---------- Kill cam (sim) ----------
+   state.visible additionally holds, at ANY range: every own missile in flight ('missile_lance'|'missile_dart', id 'M3'), every
+   entity that is the target of an in-flight missile, and burning debris of SAM kills (BURN 3 s). Every entry has far:boolean
+   (true = beyond the normal visible range: AIR_VISIBLE_KM for air/debris, 3·VISIBLE_KM for missiles).
+   CAM_FOLLOW   {id|null}            scene: kill-cam follow started (missile id) / ended (null)  — UI-side event
+   ---------- Survival / endless (sim + content) ----------
+   RS.content.makeSurvivalShift(seed) → ShiftDef { id:'SURV-'+seed, name:'Survival #'+seed, endless:true, seed, duration:0,
+       roe FREE, reserve {lance 12, dart 12, harrow 1800}, weather (seeded), CAP pair spawns, 2 comms }
+   RS.content.makeSurvivalWave(n, seed) → { spawns (t relative to wave start, 0..~60 s), comms (t relative) }  deterministic.
+       Escalates with n: jets/cruise/drones/helos from 1, swarms from 3, ARM carriers from 4, jammers from 6; friendly transit
+       with a TOWER call ~60 % of waves from 3 (IFF inop sometimes from 5).
+   Sim when def.endless: never ends on duration; state.shift + { endless:true, wave (1-based; 0 before wave 1) }.
+       Wave 1 at 8 s; next wave 15 s after every hostile of the current wave is gone, or 150 s after it began (first wins).
+       Each wave start: WAVE {n, hostiles} + BATTERY comms. Each wave cleared (while alive): stats.waves++, reserve +2 Lance,
+       +2 Dart, +200 Harrow (caps 16/16/2400) + BATTERY comms. Ends on asset_destroyed, fratricide or quit (endShift).
+   WAVE         {n, hostiles}        survival wave n started with `hostiles` hostile airframes expected
+   TUTORIAL     {step, done}         tutorial.js (optional)
+   ---------- Debrief history + stats (sim) ----------
+   RS.sim.history (reset each startShift) = { samples:[{t, tr:[[trackId, xKm(1dp), yKm(1dp), cls]]}] (every 2 s, UI knowledge only,
+       cap 900, oldest dropped), events:[{t, type, id, x, y, ...extra}] }
+       types: LAUNCH (id missileId, launcher pos, +weapon,targetId), KILL (+wasFriend, weapon), MISS (target track pos, +missileId),
+       LEAKER, ASSET_HIT (+damage), ARM_IMPACT (at 0,0, +damage), FRATRICIDE, WAVE (id 'W'+n at 0,0, +n,hostiles)
+   state.stats + { firstShotKills (hostiles killed by the first round/burst fired at them), shotsAtFriends (rounds/bursts fired at
+       true friendlies), maxEmit (longest continuous emission s), waves (survival: waves fully survived) }            */

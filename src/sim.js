@@ -34,10 +34,23 @@
     return (Math.exp(K.k * d) - 1) / (K.k * Math.max(v, 1));   // coasting under v² drag
   };
   const flyTime = (key, w, rm) => KIN[key] ? remTime(KIN[key], -KIN[key].ign, 0, rm) : rm / w.spd;
-  const IFF_DELAY = 1.5, TERMINAL_KM = 5, HIT_KM = 0.2, SALVO_GAP = { lance: 2.0, dart: 1.5 };   // s between salvo rounds (ref clip: cold-launch pair ~2 s apart)
+  const IFF_DELAY = 1.5, TERMINAL_KM = 5, DECOY_END_KM = 12, GLIM = { lance: 32, dart: 40 }, LOFT = { lance: { k: 0.22, max: 8000 }, dart: { k: 0.16, max: 2500 } }, ACTIVE_KM = { lance: 20 }, HIT_KM = 0.2, SALVO_GAP = { lance: 2.0, dart: 1.5 };   // s between salvo rounds (ref clip: cold-launch pair ~2 s apart)
   const GUN_S = 1.5, GUN_DELAY = 0.6;
   const ARM_EMIT_S = 90, ARM_KM = 45, ARM_SPD = 700, ARM_BLIND_P = 0.2, JAM_KM = 80, STRIKE_KM = 6;
   const FRAT_END_S = 4, RADAR_DOWN_S = 30, BURN_S = 3;
+  // [v20] hostile evasion. Jets get an RWR warning on our LOCK or when a SAM closes inside WARN_KM (Lance's big guidance radar is
+  // heard earlier), then maybe break (drag = turn away when the round is far, beam/notch when close), dive, or pop chaff (≤ CHAFF_KM).
+  // They resume the mission after EV_S. Missiles pay for it: coasting rounds bleed speed when they turn (TURN_BLEED per rad),
+  // lose Pk at low closing speed, and fall out of the sky below MIN_V — so long Lance shots at a dragging jet are a gamble.
+  const WARN_KM = { lance: 40, dart: 12 }, CHAFF_KM = 3, CHAFF_PK = 0.7, CHAFF_N = 2, DIVE_PK = 0.85, EV_TURN = 15, EV_DIVE = 120;
+  const EV_S = [10, 20], EV_MAX_S = 60, EV_SHOW_S = 6, EV_GAP = 3, DRAG_KM = 15.5, ABORT_P = 0.45, TURN_BLEED = 0.35, MIN_V = 350, AGILE = [0.15, 0.4];   // AGILE: Pk vs a breaking jet ∝ clamp(((v/vPeak)² − a)/b)
+  // [v20] radar repair: EMCON for REPAIR_S[0] + REPAIR_S[1]·(1 − health) s, then health = 1.
+  const REPAIR_S = [18, 13], DEGRADED = 0.7;
+  // [v1.1] weather. Rain (sky 'rain' or the STORM event): small-RCS detection ×RAIN_PD, noisier tracks, Harrow Pk ×RAIN_GUN.
+  const VIS_KM = { clear: 15, overcast: 11, rain: 6 }, RAIN_PD = 0.8, RAIN_RCS = 0.3, RAIN_NOISE = 0.15, RAIN_GUN = 0.85;
+  // [v1.1] survival: wave 1 at WAVE0 s; next wave WAVE_GAP s after the current one is clear, or WAVE_MAX s after it began.
+  const WAVE0 = 8, WAVE_GAP = 15, WAVE_MAX = 150, RESUPPLY = { lance: 3, dart: 3, harrow: 300 }, RESUPPLY_CAP = { lance: 16, dart: 16, harrow: 2400 };
+  const HIST_DT = 2, HIST_MAX = 900;
   const HOSTILE = { [K.JET_HOSTILE]: 1, [K.HELO_HOSTILE]: 1, [K.CRUISE]: 1, [K.DRONE]: 1, [K.ARM]: 1 };
   const DEF_WEAPONS = {
     lance:  { label: 'Lance',  kind: 'sam', minKm: 3, maxKm: 60, maxAlt: 20000, spd: 1840, pkBase: 0.80, reloadS: 50, perLauncher: 4 },
@@ -60,8 +73,10 @@
   let spawnIdx = 0, commsIdx = 0, roeIdx = 0, evIdx = 0, nextEnt = 1, nextTrack = 1, nextMissile = 1, nextComms = 1, warnNext = WARN_AFTER;
   let pendLaunch = [], pendIff = [], pendGun = [], debris = [], alarms = {}, lockOn = {}, activeEv = {};
   let radarDownUntil = 0, jamSent = 0, endAt = 0, endReason = '', gunUntil = 0, leakerUntil = 0, assetUntil = 0;
+  let surv = null, histNext = 0, nextGun = 1;
 
   function resetPrivate() {
+    surv = null; histNext = 0; nextGun = 1;
     ents = []; trackEnt = {}; mpriv = {}; spawnIdx = commsIdx = roeIdx = evIdx = 0;
     nextEnt = nextTrack = nextMissile = nextComms = 1; warnNext = WARN_AFTER;
     pendLaunch = []; pendIff = []; pendGun = []; debris = []; alarms = {}; lockOn = {}; activeEv = {};
@@ -92,7 +107,7 @@
     return {
       t: 0,
       shift: { id: '', name: '', duration: 0, elapsed: 0, running: false, roe: ROE.TIGHT, failed: false },
-      radar: { on: false, rangeKm: 100, sweepDeg: 0, rpm: 12, emitTime: 0, jam: 0, jamBearing: 0, health: 1, armEta: null },
+      radar: { on: false, rangeKm: 100, sweepDeg: 0, rpm: 12, emitTime: 0, jam: 0, jamBearing: 0, health: 1, armEta: null, repair: null, degraded: false },
       tracks: [], selectedId: null,
       battery: {
         launchers: [L('L1', WP.LANCE), L('L2', WP.LANCE), L('L3', WP.DART), L('G1', WP.HARROW)],
@@ -101,13 +116,24 @@
       },
       missiles: [], gun: { firing: false, bearingDeg: 0, elevDeg: 0, targetId: null },
       asset: { hp: 1 },
-      stats: { kills: 0, misses: 0, leakers: 0, fired: { lance: 0, dart: 0, harrow: 0 }, reactionTimes: [], fratricide: false },
+      stats: { kills: 0, misses: 0, leakers: 0, fired: { lance: 0, dart: 0, harrow: 0 }, reactionTimes: [], fratricide: false,
+        firstShotKills: 0, shotsAtFriends: 0, maxEmit: 0, waves: 0 },
+      weather: { time: 'dusk', sky: 'clear', visKm: VIS_KM.clear, storm: false, nightEv: false },
       comms: [], visible: []
     };
   }
 
-  const sim = { state: freshState() };
+  const sim = { state: freshState(), history: { samples: [], events: [] } };
   const emit = (n, p) => RS.bus.emit(n, p);
+  // [v1.1] debrief history: events {t, type, id, x, y} (+ extras), positions km (1 dp)
+  function hist(type, id, x, y, extra) {
+    sim.history.events.push(Object.assign({ t: rnd(sim.state.t, 1), type, id: id || null, x: rnd(x || 0, 1), y: rnd(y || 0, 1) }, extra || {}));
+  }
+  const wet = () => sim.state.weather.sky === 'rain' || sim.state.weather.storm;
+  function setWx() {
+    const w = sim.state.weather, sky = w.storm ? 'rain' : w.sky;
+    w.visKm = Math.max(3, (VIS_KM[sky] || VIS_KM.clear) * (w.time === 'night' || w.nightEv ? 0.5 : 1));
+  }
   const wrap360 = a => ((a % 360) + 360) % 360;
   const angDiff = (a, b) => ((b - a + 540) % 360) - 180;      // signed shortest a→b
   const clamp01 = v => Math.max(0, Math.min(1, v));
@@ -141,9 +167,10 @@
         id: 'E' + (nextEnt++), kind: s.kind, x: s.x + (sp ? (rand() - 0.5) * 2 * sp : 0), y: s.y + (sp ? (rand() - 0.5) * 2 * sp : 0),
         alt: s.alt, hdg: s.hdg, spd: s.spd, corridor: s.corridor ? s.corridor.map(p => p.slice()) : null, wp: 0,
         orbit: null, paints: 0, lastPaint: -1e9, trackId: null, trackT: null, leaked: false, dead: false,
-        rcs: (content.threats[s.kind] || {}).rcs || 0.3, baseAlt: s.alt, popup: s.popup || null,
+        rcs: s.rcs || (content.threats[s.kind] || {}).rcs || 0.3, baseAlt: s.alt, decoy: !!s.decoy, turnBack: s.turnBack || 0, popup: s.popup || null,
         iffBroken: !!s.iffBroken, jammer: !!s.jammer, armCarrier: !!s.armCarrier, strike: !!s.strike,
-        released: false, egress: false, armFired: false, shotAt: false, prevR: 1e9
+        released: false, egress: false, armFired: false, shotAt: false, prevR: 1e9,
+        wave: s.wave || 0, firstShot: null, spd0: s.spd, ev: null, evShow: null, evNext: 0, evaded: false, dove: false, chaff: s.kind === K.JET_HOSTILE ? CHAFF_N : 0
       };
       if (e.popup) e.alt = Math.min(e.alt, e.popup.hideAlt * 0.8);
       if (!HOSTILE[s.kind] && !e.corridor && (s.orbit || s.kind === K.JET_FRIEND)) {
@@ -168,10 +195,47 @@
     e.hdg = wrap360(e.hdg + Math.max(-m, Math.min(m, d)));
   }
 
+  // [v20] RWR reaction. m = missile in flight (or null: lock spike, reacts less often). Emits EVADE per reaction kind.
+  function evShow(e, missileId, kind) {
+    e.evShow = { kind, until: sim.state.t + EV_SHOW_S };
+    const tr = trackOf(e);
+    if (tr) tr.evade = kind;
+    emit('EVADE', { trackId: e.trackId || null, missileId: missileId || null, kind });
+  }
+  function evade(e, m) {
+    const s = sim.state, jet = e.kind === K.JET_HOSTILE;
+    if ((!jet && e.kind !== K.HELO_HOSTILE) || e.dead || s.t < e.evNext) return;
+    const th = content.threats[e.kind] || {}, man = typeof th.maneuver === 'number' ? th.maneuver : 0.5;
+    if (rand() >= (m ? 0.25 + 0.5 * man : 0.3 * man)) return;               // jet (.6): 55 % vs a missile, 18 % vs a lock
+    e.evNext = s.t + EV_GAP; e.evaded = true;
+    const until = s.t + EV_S[0] + rand() * (EV_S[1] - EV_S[0]);
+    if (!jet) {                                                           // helo: drop into the weeds (terrain mask)
+      e.ev = { until, start: s.t, mid: m ? m.id : null, hdg: null, alt: 20 + rand() * 20 }; e.dove = true;
+      evShow(e, m && m.id, 'dive'); return;
+    }
+    const ox = m ? m.x : 0, oy = m ? m.y : 0, d = Math.hypot(e.x - ox, e.y - oy), away = bearingOf(e.x - ox, e.y - oy);
+    const far = d > DRAG_KM, brk = !!m && rand() < (far ? 0.65 : 0.6), dive = !brk || rand() < 0.35;   // a lock spike only sends it low
+    let hdg = null;
+    if (brk) {
+      let want, lo = 60, hi = 120;
+      if (far) { want = away + (rand() - 0.5) * 40; hi = 150; }                          // drag: run it out of energy
+      else { const a = angDiff(e.hdg, away + 90), b = angDiff(e.hdg, away - 90); want = e.hdg + (Math.abs(a) < Math.abs(b) ? a : b); }   // beam / notch
+      const dh = angDiff(e.hdg, want), mag = Math.max(lo, Math.min(hi, Math.abs(dh)));
+      hdg = wrap360(e.hdg + (dh < 0 ? -mag : mag));
+      e.spd = Math.round(e.spd0 * 1.1);                                  // burner
+    }
+    e.ev = { until, start: s.t, mid: m ? m.id : null, hdg: hdg !== null ? hdg : (e.ev ? e.ev.hdg : null), alt: dive ? 100 + rand() * 200 : (e.ev ? e.ev.alt : null),
+      abort: (e.ev && e.ev.abort) || (brk && far && rand() < ABORT_P) };                 // a jet that had to run may give up the attack
+    if (dive) e.dove = true;
+    if (brk) evShow(e, m && m.id, 'break');
+    if (dive) evShow(e, m && m.id, 'dive');
+  }
+
   function assetHit(e, dmg) {
     const s = sim.state;
     s.asset.hp = Math.max(0, rnd(s.asset.hp - dmg, 3));
     emit('ASSET_HIT', { byId: e.trackId || e.id, damage: rnd(dmg, 2) });
+    hist('ASSET_HIT', e.trackId || e.id, e.x, e.y, { damage: rnd(dmg, 2) });
     assetUntil = s.t + 5;
     if (s.asset.hp <= 0 && !endAt) { s.shift.failed = true; endAt = s.t + FRAT_END_S; endReason = 'asset_destroyed'; }
   }
@@ -181,7 +245,9 @@
     if (!(R.on || rand() < ARM_BLIND_P)) return;
     const dmg = 0.35 + rand() * 0.25;
     R.health = Math.max(0.1, rnd(R.health - dmg, 3));      // floor: degraded, never destroyed
+    R.degraded = R.health < DEGRADED;
     emit('ARM_IMPACT', { damage: rnd(dmg, 2) });
+    hist('ARM_IMPACT', e.trackId || e.id, 0, 0, { damage: rnd(dmg, 2) });
     if (R.health < 0.3) forceRadarOff(RADAR_DOWN_S);
   }
 
@@ -204,11 +270,21 @@
       const corr = Math.max(-40, Math.min(40, (ro - o.r) * 8));  // pull toward circle
       e.hdg = wrap360(e.hdg + Math.max(-turn * dt, Math.min(turn * dt, angDiff(e.hdg, tang + corr))));
     } else if (hostile) {
-      if (e.egress) steerTo(e, e.x * 10, e.y * 10, 8, dt);      // turn outbound and leave
-      else if (r > DEFENDED_KM && !e.leaked) steerTo(e, 0, 0, e.kind === K.DRONE ? 4 : 2, dt);
-      if (e.kind === K.DRONE) e.hdg = wrap360(e.hdg + Math.sin(s.t * 0.3 + e.x) * 4 * dt);
+      if (e.ev && s.t >= e.ev.until && !(mpriv[e.ev.mid] && s.t < e.ev.start + EV_MAX_S)) {   // missile defeated → resume the mission
+        if (e.ev.abort && !e.egress) { e.egress = true; e.egressKm = r + 20; }                // … or abort and egress
+        e.ev = null; e.spd = e.spd0;
+      }
+      if (e.turnBack && !e.egress && r < e.turnBack) { e.egress = true; e.egressKm = r + 25; }   // V1.2: probe turns back at the line
+      const ev = e.ev;
+      if (ev) {
+        if (ev.hdg !== null) { const m = EV_TURN * dt; e.hdg = wrap360(e.hdg + Math.max(-m, Math.min(m, angDiff(e.hdg, ev.hdg)))); }
+        if (ev.alt !== null) e.alt = Math.max(Math.min(e.alt, ev.alt), e.alt - EV_DIVE * dt);
+      } else if (e.egress) steerTo(e, e.x * 10, e.y * 10, 8, dt);      // turn outbound and leave
+      else if (r > DEFENDED_KM && !e.leaked) steerTo(e, 0, 0, e.kind === K.DRONE ? 4 : e.evaded ? 6 : 2, dt);
+      if (!ev && e.dove && e.alt < e.baseAlt && !(e.popup && r > e.popup.atKm)) e.alt = Math.min(e.baseAlt, e.alt + 25 * dt);   // climb back
+      if (e.kind === K.DRONE && !e.decoy) e.hdg = wrap360(e.hdg + Math.sin(s.t * 0.3 + e.x) * 4 * dt);
     }
-    if (e.popup && r <= e.popup.atKm) e.alt = Math.min(e.baseAlt, e.alt + 15 * dt);
+    if (e.popup && r <= e.popup.atKm && !e.ev) e.alt = Math.min(e.baseAlt, e.alt + 15 * dt);
     const v = e.spd / 1000 * dt;
     e.x += Math.sin(e.hdg * D2R) * v;
     e.y += Math.cos(e.hdg * D2R) * v;
@@ -218,6 +294,8 @@
       e.prevR = r;
       return r > EXIT_KM ? 'exited' : null;
     }
+    // V1.2: decoy (MALD-style): jet-like radar return, flies dead straight, never reacts, burns out ~12 km out (no damage, no leaker)
+    if (e.decoy && r < DECOY_END_KM) return 'exited';
     if (hostile && e.strike && !e.released && r < STRIKE_KM) {
       e.released = true; e.egress = true;
       assetHit(e, 0.15 + rand() * 0.15);
@@ -225,9 +303,10 @@
     if (hostile && !e.leaked && !e.released && r < DEFENDED_KM) {
       e.leaked = true; s.stats.leakers++; leakerUntil = s.t + 5;
       emit('LEAKER', { id: e.trackId || e.id });
+      hist('LEAKER', e.trackId || e.id, e.x, e.y);
     }
     if ((e.kind === K.CRUISE || e.kind === K.DRONE) && r < 0.5) { assetHit(e, e.kind === K.CRUISE ? 0.25 : 0.08); return 'exited'; }
-    if (r > EXIT_KM || ((e.egress || e.leaked) && r > EGRESS_KM)) return 'exited';
+    if (r > EXIT_KM || ((e.egress || e.leaked) && r > (e.egressKm || EGRESS_KM))) return 'exited';
     return null;
   }
 
@@ -248,6 +327,7 @@
     if (x >= 1) return 0;
     let p = 0.95 * (1 - x * x * x * x);
     if (r > horizon * 0.85) p *= 0.5;                // clutter near the horizon
+    if (e.rcs < RAIN_RCS && wet()) p *= RAIN_PD;      // [v1.1] rain clutter hides small targets
     return p * (1 - 0.7 * radar.jam);
   }
 
@@ -262,7 +342,7 @@
       const tr = {
         id: 'T' + String(nextTrack++).padStart(2, '0'), x: 0, y: 0, alt: 0, hdg: 0, spd: 0, rangeKm: 0, bearingDeg: 0,
         closure: 0, quality: 0.4, firstSeen: t, lastSeen: t, iff: IFF.NONE, cls: CLS.UNKNOWN, priority: 0,
-        assigned: null, strobe: false, engagedBy: []
+        assigned: null, strobe: false, engagedBy: [], evade: null
       };
       trackEnt[tr.id] = e;
       e.trackId = tr.id;
@@ -278,7 +358,7 @@
 
   function updateTrack(tr, e) {
     const R = sim.state.radar;
-    let n = (1 - tr.quality) * 0.3 + R.jam * 0.6;                // measurement noise: quality + jamming
+    let n = (1 - tr.quality) * 0.3 + R.jam * 0.6 + (wet() ? RAIN_NOISE : 0);   // measurement noise: quality + jamming + rain
     if (onJamBearing(bearingOf(e.x, e.y))) n += R.jam * 3;       // strobe: position unreliable
     tr.x = e.x + (rand() - 0.5) * n; tr.y = e.y + (rand() - 0.5) * n;
     tr.alt = Math.round(e.alt / 50) * 50; tr.hdg = Math.round(e.hdg); tr.spd = Math.round(e.spd);
@@ -299,6 +379,8 @@
     tr.assigned = s.battery.assignedTo[tr.id] || null;
     tr.strobe = onJamBearing(tr.bearingDeg);
     tr.engagedBy = s.missiles.filter(m => m.targetId === tr.id).map(m => m.id);
+    const e = trackEnt[tr.id];
+    tr.evade = e && e.evShow && s.t < e.evShow.until ? e.evShow.kind : null;
   }
 
   function snapshot(tr) {
@@ -332,6 +414,8 @@
       if (cur) emit('LOCK', { id: cur, launcherId: lid, on: false });
       lockOn[lid] = id;
       emit('LOCK', { id, launcherId: lid, on: true });
+      if (trackEnt[id]) evade(trackEnt[id], null);                  // RWR spike: fire-control radar locked on
+
     } else if (cur && (id === null || cur === id)) {
       lockOn[lid] = null;
       emit('LOCK', { id: cur, launcherId: lid, on: false });
@@ -367,7 +451,7 @@
     const u = (r - w.minKm) / (w.maxKm - w.minKm);
     // missiles lose Pk at both envelope edges; a gun is best close in and fades with range (last-ditch CIWS)
     const edge = !inRange ? 0 : gun ? 1 - 0.4 * u * u : Math.min(1, 0.5 + 0.5 * Math.min(u, 1 - u) / 0.15);
-    const pk = clamp01((gun ? w.pkPerBurst : w.pkBase) * pkMod(e ? e.kind : null, L.weapon) *
+    const pk = clamp01((gun ? w.pkPerBurst * (wet() ? RAIN_GUN : 1) : w.pkBase) * pkMod(e ? e.kind : null, L.weapon) *
       (1 - (gun ? 0.2 : 0.5) * s.radar.jam) * (0.6 + 0.4 * tr.quality) * edge);
     const tti = gun ? GUN_DELAY : rnd(flyTime(L.weapon, w, r * 1000), 1);
     let reason = null;
@@ -385,13 +469,20 @@
     L.rounds--; s.stats.fired[L.weapon]++;
     const m = {
       id: 'M' + (nextMissile++), weapon: L.weapon, x: p[0], y: p[1], alt: 5, targetId: trackId, launcherId: L.id, flightT: 0,
-      hdg: Math.round(bearingOf(e.x - p[0], e.y - p[1])), spd: 0, phase: 'boost',
+      hdg: Math.round(bearingOf(e.x - p[0], e.y - p[1])), spd: 0, phase: 'boost', active: false, loft: 0,
       tti: rnd(flyTime(L.weapon, w, Math.hypot(e.x - p[0], e.y - p[1]) * 1000), 1)
     };
     s.missiles.push(m);
     mpriv[m.id] = { ent: e, pk, degraded: false, v: 0, bo: false };
+    shotAt(e, m.id);
     emit('LAUNCH', { missileId: m.id, weapon: m.weapon, launcherId: L.id, targetId: trackId, x: p[0], y: p[1], alt: 0 });
+    hist('LAUNCH', m.id, p[0], p[1], { weapon: m.weapon, targetId: trackId });
     if (L.rounds <= 0) startReload(L);
+  }
+
+  function shotAt(e, key) {                         // [v1.1] first-shot + friendly-fire bookkeeping
+    if (e.firstShot === null) e.firstShot = key;
+    if (!HOSTILE[e.kind]) sim.state.stats.shotsAtFriends++;
   }
 
   function fireGun(L, tr, e, salvo, pk) {
@@ -402,28 +493,34 @@
     const brg = tr.bearingDeg, elev = rnd(Math.atan2(tr.alt, tr.rangeKm * 1000) / D2R, 1);
     s.gun = { firing: true, bearingDeg: brg, elevDeg: elev, targetId: tr.id };
     L.ready = false; gunUntil = s.t + GUN_S * (salvo ? 2 : 1);
-    pendGun.push({ at: s.t + GUN_DELAY, e, trackId: tr.id, pk: pkEff });
+    const key = 'G' + (nextGun++);
+    shotAt(e, key);
+    pendGun.push({ at: s.t + GUN_DELAY, e, trackId: tr.id, pk: pkEff, key });
     emit('GUN_FIRE', { launcherId: L.id, targetId: tr.id, burst: true, bearingDeg: brg, elevDeg: elev, rounds: n });
     if (L.rounds <= 0) startReload(L);
   }
 
-  function kill(e, weapon, targetId) {
+  function kill(e, weapon, targetId, key) {
     const s = sim.state, friend = !HOSTILE[e.kind], trackId = e.trackId || null, tid = trackId || targetId || e.id;
-    if (!friend) s.stats.kills++;
+    if (!friend) { s.stats.kills++; if (key && key === e.firstShot) s.stats.firstShotKills++; }
     emit('KILL', { targetId: tid, weapon, wasFriend: friend, x: e.x, y: e.y, alt: e.alt, trackId });
+    hist('KILL', tid, e.x, e.y, { wasFriend: friend, weapon });
     if (friend) {
       emit('FRATRICIDE', { targetId: tid });
+      hist('FRATRICIDE', tid, e.x, e.y);
       s.stats.fratricide = true; s.shift.failed = true;
       alarm('fratricide', true);
       if (!endAt || endReason !== 'fratricide') { endAt = s.t + FRAT_END_S; endReason = 'fratricide'; }
     }
-    debris.push({ e, until: s.t + BURN_S });
+    debris.push({ e, until: s.t + BURN_S, cam: weapon !== WP.HARROW });   // cam: SAM kill → keep visible at any range (kill cam)
     removeEnt(e, 'killed');
   }
 
   function miss(missileId, targetId) {
     sim.state.stats.misses++;
     emit('MISS', { missileId, targetId });
+    const tr = findTrack(targetId);
+    hist('MISS', targetId, tr ? tr.x : 0, tr ? tr.y : 0, { missileId });
   }
 
   function startReload(L) {
@@ -458,10 +555,28 @@
       const v = P.v;
       m.spd = Math.round(v);
       m.motor = te > 0 && te < K.burn;
-      m.phase = te < K.burn ? 'boost' : d0 < TERMINAL_KM * 1000 ? 'terminal' : 'midcourse';
-      if (!R.on && (m.phase === 'midcourse' || (m.phase === 'terminal' && m.weapon !== WP.LANCE))) P.degraded = true;
+      // V1.1.3: Lance = active radar seeker (9M317MA-style): inside ACTIVE_KM it homes on its own and no longer needs our
+      // radar (latched: once active it stays active). Dart stays semi-active: our radar must illuminate until impact.
+      const aKm = ACTIVE_KM[m.weapon] || 0;
+      if (aKm && !m.active && te >= K.burn && d0 < aKm * 1000) { m.active = true; emit('MISSILE_ACTIVE', { missileId: m.id, targetId: m.targetId, weapon: m.weapon }); }
+      m.phase = te < K.burn ? 'boost' : (m.active || d0 < TERMINAL_KM * 1000) ? 'terminal' : 'midcourse';
+      if (!R.on && !m.active && (m.phase === 'midcourse' || m.phase === 'terminal')) P.degraded = true;
+      if (!P.warned && d0 < (WARN_KM[m.weapon] || 0) * 1000) { P.warned = true; evade(e, m); }       // [v20] RWR / MAWS
+      if (!P.chaffT && d0 < CHAFF_KM * 1000) {                                                         // terminal chaff
+        P.chaffT = true;
+        if (e.chaff > 0 && e.ev && rand() < 0.7) { e.chaff--; P.pk *= CHAFF_PK; evShow(e, m.id, 'chaff'); }   // only a jet already defending
+      }
       const tgo = remTime(K, te, v, d0), ev = e.spd / 1000 * tgo;            // lead pursuit on the true entity
-      const dx = (e.x + Math.sin(e.hdg * D2R) * ev - m.x) * 1000, dy = (e.y + Math.cos(e.hdg * D2R) * ev - m.y) * 1000, dz = e.alt - m.alt;
+      const dx = (e.x + Math.sin(e.hdg * D2R) * ev - m.x) * 1000, dy = (e.y + Math.cos(e.hdg * D2R) * ev - m.y) * 1000;
+      const dz = e.alt - m.alt;
+      // V1.2.1 loft (display only, so kinematics/Pk/timing stay as tuned): an arc over the straight guidance line,
+      // peaking mid-flight at k·(launch range) up to max, zero at launch and at intercept. visible.alt = m.alt + m.loft.
+      const LF = LOFT[m.weapon];
+      if (LF && te > 0) {
+        if (!P.r0) P.r0 = Math.max(d0, 1);
+        const pr = clamp01(1 - d0 / P.r0), H = Math.min(LF.max, P.r0 * LF.k);
+        m.loft = Math.round(H * 4 * pr * (1 - pr) * Math.min(1, te / (K.pitch || 1)));
+      }
       const dd = Math.hypot(dx, dy, dz) || 1;
       if (te <= 0) {                                         // thrown out of the canister: straight up, motor not lit
         if (P.alt0 === undefined) P.alt0 = m.alt;
@@ -471,7 +586,24 @@
         const k = K.pitch > 0 ? Math.min(1, te / K.pitch) : 1, kk = k * k * (3 - 2 * k);
         let ux = dx / dd * kk, uy = dy / dd * kk, uz = dz / dd * kk + (1 - kk);
         const un = Math.hypot(ux, uy, uz) || 1, step = Math.min(v * dt, dd);
-        m.x += ux / un * step / 1000; m.y += uy / un * step / 1000; m.alt += uz / un * step;
+        ux /= un; uy /= un; uz /= un;
+        // V1.2.2 G-limit: after pitch-over the airframe can only turn at ω = G·g/v, so a breaking jet makes the round
+        // swing through a visible arc (and a late hard break can make it overshoot). m.g = G being pulled (display).
+        let gNow = 0;
+        if (P.u && kk >= 1 && v > 1) {
+          const c = Math.max(-1, Math.min(1, ux * P.u[0] + uy * P.u[1] + uz * P.u[2])), a = Math.acos(c);
+          const maxA = (GLIM[m.weapon] || 30) * 9.81 / v * dt;
+          if (a > maxA) {
+            const f = maxA / a;
+            ux = P.u[0] + (ux - P.u[0]) * f; uy = P.u[1] + (uy - P.u[1]) * f; uz = P.u[2] + (uz - P.u[2]) * f;
+            const n2 = Math.hypot(ux, uy, uz) || 1; ux /= n2; uy /= n2; uz /= n2;
+          }
+          gNow = Math.min(a, maxA) / dt * v / 9.81;
+        }
+        m.g = Math.round(((m.g || 0) * 0.7 + gNow * 0.3) * 10) / 10;
+        if (P.bo && P.u) P.v *= Math.max(0, 1 - TURN_BLEED * Math.acos(Math.max(-1, Math.min(1, ux * P.u[0] + uy * P.u[1] + uz * P.u[2]))));   // induced drag
+        P.u = [ux, uy, uz];
+        m.x += ux * step / 1000; m.y += uy * step / 1000; m.alt += uz * step;
       }
       m.hdg = Math.round(bearingOf(dx, dy));
       const d1 = Math.hypot((e.x - m.x) * 1000, (e.y - m.y) * 1000, e.alt - m.alt);
@@ -479,8 +611,11 @@
       if (d1 < HIT_KM * 1000) {
         done();
         emit('INTERCEPT', { missileId: m.id, targetId: m.targetId, x: e.x, y: e.y, alt: e.alt });
-        if (rand() < P.pk * (P.degraded ? 0.25 : 1)) kill(e, m.weapon, m.targetId); else miss(m.id, m.targetId);
-      } else if (m.flightT > K.tmax) { done(); miss(m.id, m.targetId); }   // out of energy / guidance time
+        const u = P.u || [0, 0, 0], vc = v - (Math.sin(e.hdg * D2R) * u[0] + Math.cos(e.hdg * D2R) * u[1]) * e.spd;   // closing speed
+        const q = v / (K.acc * K.burn), agile = e.ev && e.ev.hdg !== null ? clamp01((q * q - AGILE[0]) / AGILE[1]) : 1;   // g available ∝ v²
+        const pk = P.pk * (P.degraded ? 0.25 : 1) * clamp01((vc - 300) / 600) * agile * (e.ev && e.ev.alt !== null && e.alt < 400 ? DIVE_PK : 1);
+        if (rand() < pk) kill(e, m.weapon, m.targetId, m.id); else miss(m.id, m.targetId);
+      } else if (m.flightT > K.tmax || (P.bo && v < Math.max(MIN_V, e.spd * 1.3))) { done(); miss(m.id, m.targetId); }   // out of energy / guidance time
     }
   }
 
@@ -510,6 +645,7 @@
     const s = sim.state, detail = ev.detail === undefined ? null : ev.detail;
     activeEv[ev.kind] = { until: s.t + (ev.duration || 0), detail };
     emit('RANDOM_EVENT', { kind: ev.kind, active: true, detail });
+    if (ev.kind === RE.STORM) { s.weather.storm = true; setWx(); } else if (ev.kind === RE.NIGHT) { s.weather.nightEv = true; setWx(); }
     if (ev.kind === RE.RADAR_FAULT) forceRadarOff(ev.duration || 20);
     else if (ev.kind === RE.LAUNCHER_JAM) { const L = evLauncher(detail); L.jammed = true; setLock(L.id, null, false); }
     else if (ev.kind === RE.ROE_CHANGE && detail && detail.roe) setRoe(detail.roe);
@@ -518,6 +654,7 @@
   function endEvent(kind) {
     const a = activeEv[kind];
     delete activeEv[kind];
+    if (kind === RE.STORM) { sim.state.weather.storm = false; setWx(); } else if (kind === RE.NIGHT) { sim.state.weather.nightEv = false; setWx(); }
     if (kind === RE.LAUNCHER_JAM) evLauncher(a.detail).jammed = false;
     else if (kind === RE.LATE_RESUPPLY && a.detail) {
       const res = sim.state.battery.reserve;
@@ -559,6 +696,11 @@
     sim.state = freshState();
     const s = sim.state, byT = (a, b) => a.t - b.t;
     s.shift = { id: def.id, name: def.name, duration: def.duration, elapsed: 0, running: true, roe: def.roe || ROE.TIGHT, failed: false };
+    const wx = def.weather || {};
+    s.weather = { time: wx.time || 'dusk', sky: wx.sky || 'clear', visKm: 0, storm: false, nightEv: false }; setWx();
+    if (typeof def.radarHealth === 'number') { s.radar.health = Math.max(0.1, Math.min(1, def.radarHealth)); s.radar.degraded = s.radar.health < DEGRADED; }   // V1.2: start damaged (Last Stand)
+    sim.history = { samples: [], events: [] };
+    if (def.endless) { s.shift.endless = true; s.shift.wave = 0; surv = { n: 0, start: 0, next: WAVE0, open: [], counted: {} }; }
     spawnList = (def.spawns || []).map(pushOut).sort(byT);
     commsList = (def.comms || []).slice().sort(byT);
     roeList = (def.roeChanges || []).slice().sort(byT);
@@ -567,11 +709,49 @@
     sim.cmd.radar(true);
   };
 
+  /* ---------- [v1.1] survival (endless) waves ---------- */
+  function queue(list, idx, items) { return list.slice(idx).concat(items).sort((a, b) => a.t - b.t); }
+  function startWave(el) {
+    const s = sim.state, n = ++surv.n, W = content.makeSurvivalWave(n, def.seed >>> 0 || 0) || { spawns: [], comms: [] };
+    if (n > 1 && !surv.counted[n - 1]) { surv.counted[n - 1] = 1; s.stats.waves++; }   // outlasted the previous wave
+    surv.start = el; surv.next = el + WAVE_MAX; surv.open.push(n);
+    s.shift.wave = n;
+    const sp = (W.spawns || []).map(x => { const o = pushOut(x); return Object.assign({}, o, { t: o.t + el, wave: n }); });
+    spawnList = queue(spawnList, spawnIdx, sp); spawnIdx = 0;
+    commsList = queue(commsList, commsIdx, (W.comms || []).map(c => Object.assign({}, c, { t: c.t + el }))); commsIdx = 0;
+    let hostiles = 0;
+    for (const x of sp) if (HOSTILE[x.kind]) hostiles += x.count > 1 ? Math.floor(x.count) : 1;
+    emit('WAVE', { n, hostiles });
+    hist('WAVE', 'W' + n, 0, 0, { n, hostiles });
+    pushComms('BATTERY', 'Wave ' + n + ' inbound: ' + hostiles + ' hostile' + (hostiles === 1 ? '' : 's') + ' expected.', 'high');
+  }
+  function waveGone(n) {
+    for (const e of ents) if (e.wave === n && HOSTILE[e.kind]) return false;
+    for (let i = spawnIdx; i < spawnList.length; i++) if (spawnList[i].wave === n && HOSTILE[spawnList[i].kind]) return false;
+    return true;
+  }
+  function survTick(el) {
+    const s = sim.state;
+    if (el >= surv.next) startWave(el);
+    for (let i = surv.open.length - 1; i >= 0; i--) {
+      const n = surv.open[i];
+      if (!waveGone(n)) continue;
+      surv.open.splice(i, 1);
+      if (s.asset.hp <= 0 || s.shift.failed) continue;
+      if (!surv.counted[n]) { surv.counted[n] = 1; s.stats.waves++; }
+      const res = s.battery.reserve;
+      for (const w in RESUPPLY) res[w] = Math.max(res[w], Math.min(RESUPPLY_CAP[w], res[w] + RESUPPLY[w]));
+      pushComms('BATTERY', 'Wave ' + n + ' clear. Resupply in: +' + RESUPPLY.lance + ' Lance, +' + RESUPPLY.dart + ' Dart, +' + RESUPPLY.harrow + ' Harrow.', 'normal');
+      if (n === surv.n) surv.next = Math.min(surv.next, el + WAVE_GAP);
+    }
+  }
+
   sim.step = function () {
     const s = sim.state, dt = RS.SIM_DT, R = s.radar;
     if (!s.shift.running) return;
     s.t += dt; s.shift.elapsed += dt;
     const el = s.shift.elapsed;
+    if (surv) survTick(el);
 
     while (spawnIdx < spawnList.length && spawnList[spawnIdx].t <= el) spawn(spawnList[spawnIdx++]);
     while (commsIdx < commsList.length && commsList[commsIdx].t <= el) {
@@ -603,7 +783,7 @@
       const g = pendGun[i];
       if (s.t < g.at) continue;
       pendGun.splice(i, 1);
-      if (!g.e.dead && rand() < g.pk) kill(g.e, WP.HARROW, g.trackId); else miss(null, g.trackId);
+      if (!g.e.dead && rand() < g.pk) kill(g.e, WP.HARROW, g.trackId, g.key); else miss(null, g.trackId);
     }
     const G1 = launcher('G1');
     if (s.gun.firing && s.t >= gunUntil) { s.gun.firing = false; s.gun.targetId = null; if (G1.reloadT <= 0) G1.ready = true; }
@@ -627,6 +807,14 @@
     R.jam = rnd(jam, 2); R.jamBearing = Math.round(jb);
     if (Math.abs(R.jam - jamSent) >= 0.1 || (R.jam === 0 && jamSent > 0)) { jamSent = R.jam; emit('JAMMING', { level: R.jam, bearing: R.jamBearing }); }
 
+    // radar repair (EMCON while the crew works)
+    if (R.repair && s.t >= R.repair.until) {
+      R.repair = null; R.health = 1;
+      emit('RADAR_REPAIR', { active: false, health: R.health });
+      pushComms('BATTERY', 'Radar repaired. Transmit when ready.', 'high');
+    }
+    R.degraded = R.health < DEGRADED;
+
     // radar sweep + paints
     if (radarDownUntil && s.t >= radarDownUntil) { radarDownUntil = 0; alarm('radar', false); if (!R.on) pushComms('BATTERY', 'Radar back up. Transmit when ready.', 'high'); }
     if (R.on && R.health > 0) {
@@ -639,6 +827,7 @@
         if (off < delta && rand() < pd(e, r)) paint(e);
       }
       R.emitTime += dt;
+      if (R.emitTime > s.stats.maxEmit) s.stats.maxEmit = Math.round(R.emitTime);
       if (R.emitTime >= warnNext) { emit('RADAR_WARN', { seconds: Math.round(R.emitTime) }); warnNext += WARN_EVERY; }
     }
 
@@ -676,25 +865,42 @@
     alarm('asset', s.t < assetUntil);
     checkAmmo();
 
-    // truth for the scene
+    // truth for the scene. [v1.1] kill cam: own missiles in flight, their targets and SAM-kill debris at ANY range (far:true beyond
+    // the normal visible ranges).
     s.visible = [];
+    const AIR = RS.AIR_VISIBLE_KM || RS.VISIBLE_KM, tgt = new Set();
+    for (const m of s.missiles) if (mpriv[m.id]) tgt.add(mpriv[m.id].ent);
+    // V1.3 EO tracker: the selected track's entity is visible at any range (sel:true) so the camera can look at it
+    let selE = null;
+    if (s.selectedId) { selE = ents.find(e => e.trackId === s.selectedId && !e.dead) || null; if (selE) tgt.add(selE); }
     for (const e of ents) {
-      if (Math.hypot(e.x, e.y) <= (RS.AIR_VISIBLE_KM || RS.VISIBLE_KM)) s.visible.push({ id: e.id, kind: e.kind, x: e.x, y: e.y, alt: e.alt, hdg: e.hdg, burning: false, spd: e.spd });
+      const far = Math.hypot(e.x, e.y) > AIR;
+      if (!far || tgt.has(e)) s.visible.push(e === selE ? { id: e.id, kind: e.kind, x: e.x, y: e.y, alt: e.alt, hdg: e.hdg, burning: false, spd: e.spd, far, sel: true }
+        : { id: e.id, kind: e.kind, x: e.x, y: e.y, alt: e.alt, hdg: e.hdg, burning: false, spd: e.spd, far });
     }
     for (let i = debris.length - 1; i >= 0; i--) {
       const d = debris[i], e = d.e;
       if (s.t >= d.until) { debris.splice(i, 1); continue; }
       const v = e.spd * 0.5 / 1000 * dt;
       e.x += Math.sin(e.hdg * D2R) * v; e.y += Math.cos(e.hdg * D2R) * v; e.alt = Math.max(0, e.alt - 80 * dt);
-      if (Math.hypot(e.x, e.y) <= (RS.AIR_VISIBLE_KM || RS.VISIBLE_KM)) s.visible.push({ id: e.id, kind: e.kind, x: e.x, y: e.y, alt: e.alt, hdg: e.hdg, burning: true, spd: e.spd });
+      const far = Math.hypot(e.x, e.y) > AIR;
+      if (!far || d.cam || (s.selectedId && e.trackId === s.selectedId)) s.visible.push({ id: e.id, kind: e.kind, x: e.x, y: e.y, alt: e.alt, hdg: e.hdg, burning: true, spd: e.spd, far, sel: !!(s.selectedId && e.trackId === s.selectedId) });
     }
     for (const m of s.missiles) {
-      if (Math.hypot(m.x, m.y) <= RS.VISIBLE_KM * 3) s.visible.push({ id: m.id, kind: 'missile_' + m.weapon, x: m.x, y: m.y, alt: m.alt, hdg: m.hdg, burning: !!m.motor, spd: m.spd });
+      const far = Math.hypot(m.x, m.y) > RS.VISIBLE_KM * 3;
+      s.visible.push({ id: m.id, kind: 'missile_' + m.weapon, x: m.x, y: m.y, alt: m.alt + (m.loft || 0), g: m.g || 0, hdg: m.hdg, burning: !!m.motor, spd: m.spd, far });
+    }
+    // [v1.1] debrief history: UI-knowledge track samples every HIST_DT s
+    if (s.t >= histNext) {
+      histNext = s.t + HIST_DT - 1e-9;
+      const H = sim.history.samples;
+      H.push({ t: rnd(s.t, 1), tr: s.tracks.map(k => [k.id, rnd(k.x, 1), rnd(k.y, 1), k.cls]) });
+      if (H.length > HIST_MAX) H.shift();
     }
 
     emit('SIM_TICK', { t: s.t, dt });
     if (endAt && s.t >= endAt) sim.endShift(endReason);
-    else if (s.shift.elapsed >= s.shift.duration) sim.endShift('complete');
+    else if (!surv && s.shift.elapsed >= s.shift.duration) sim.endShift('complete');
   };
 
   sim.endShift = function (reason) {
@@ -717,7 +923,7 @@
     radar(on) {
       const s = sim.state, R = s.radar;
       on = !!on;
-      if (on && (R.health <= 0 || s.t < radarDownUntil)) return false;
+      if (on && (R.health <= 0 || s.t < radarDownUntil || R.repair)) return false;
       if (R.on === on) return true;
       R.on = on;
       if (!on) { R.emitTime = 0; warnNext = WARN_AFTER; }
@@ -786,6 +992,16 @@
       }
       return true;
     },
+    repairRadar() {                              // [v20] radar goes cold for the repair; operator re-transmits after
+      const s = sim.state, R = s.radar;
+      if (!s.shift.running || R.repair || !(R.health < 0.95)) return false;
+      const total = rnd(REPAIR_S[0] + REPAIR_S[1] * (1 - R.health), 1);
+      R.repair = { until: rnd(s.t + total, 2), total };
+      if (R.on) { R.on = false; R.emitTime = 0; warnNext = WARN_AFTER; emit('RADAR_STATE', { on: false }); }
+      emit('RADAR_REPAIR', { active: true, health: R.health });
+      pushComms('BATTERY', 'Radar cold for repairs, ' + Math.round(total) + ' seconds.', 'normal');
+      return true;
+    },
     reload(lid) {
       const L = launcher(lid);
       return !!L && startReload(L);
@@ -801,6 +1017,8 @@
   /* ---------- queries (read-only) ---------- */
   /** TEST-ONLY truth peek (never used by UI/scene): true kind behind a track, or null. */
   sim.debugTruth = id => (trackEnt[id] ? trackEnt[id].kind : null);
+  /** TEST-ONLY: current Pk of a missile in flight (after chaff), or null. */
+  sim.debugPk = id => (mpriv[id] ? mpriv[id].pk : null);
 
   sim.query = {
     engage(trackId, launcherId) {

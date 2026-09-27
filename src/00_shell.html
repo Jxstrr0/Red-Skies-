@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#050707">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Red Skies</title>
+<title>Red Skies - V%RS_VERSION%</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Russo+One&family=Big+Shoulders+Display:wght@500;700&display=swap" rel="stylesheet">
@@ -27,30 +27,68 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 #app { position: absolute; inset: 0; display: flex; flex-direction: column; height: 100%; max-width: 560px; margin: 0 auto; }
 
 /* ---- hatch (3-D view) ---- */
-#hatch { position: relative; flex: 0 0 35%; min-height: 0; background: #000; overflow: hidden; border-bottom: 2px solid #000; }
-#view { display: block; width: 100%; height: 100%; }
-#hud { position: absolute; left: 0; right: 0; top: 0; display: flex; justify-content: space-between; align-items: flex-start;
+/* V1.4: the hatch is the Pantsir cabin (3-D, ~55 % of the phone): the radar console #p-scope and the EO overlay #eo are real DOM,
+   projected onto the cabin's monitors with a matrix3d homography by RS.cabin (cabin.js) */
+#hatch { position: relative; flex: 0 0 55%; min-height: 0; background: #000; overflow: hidden; border-bottom: 2px solid #000; }
+#view { display: block; width: 100%; height: 100%; touch-action: none; }
+#hud { position: absolute; z-index: 3; left: 0; right: 0; top: 0; display: flex; justify-content: space-between; align-items: flex-start;
   padding: calc(6px + env(safe-area-inset-top)) 10px 0; pointer-events: none; font-size: 11px; letter-spacing: .08em; }
 #hud > * { background: rgba(0,0,0,.45); padding: 3px 6px; border-radius: 3px; }
 #title { pointer-events: auto; color: var(--amber); font-weight: 700; min-height: 32px; display: inline-flex; align-items: center; }
 #clock { color: var(--green-mid); }
-#debug { position: absolute; left: 10px; top: calc(44px + env(safe-area-inset-top)); color: var(--green); font-size: 10px; white-space: pre; }
+#debug { position: absolute; z-index: 3; left: 10px; top: calc(44px + env(safe-area-inset-top)); color: var(--green); font-size: 10px; white-space: pre; }
 
 /* ---- desk: scope always on top, tabbed monitor below ---- */
 #desk { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 3px; padding: 3px 4px;
   background: linear-gradient(#141a16, #0a0d0b); }
 .panel { min-height: 0; display: flex; flex-direction: column; background: var(--panel);
   border: 1px solid var(--line); border-radius: 5px; overflow: hidden; box-shadow: inset 0 0 18px rgba(0,0,0,.8); }
-#p-scope { flex: 1 1 58%; position: relative; border-color: var(--line-hi); }
-#scope { display: block; width: 100%; height: 100%; touch-action: none; }
-.scopebtn { position: absolute; min-width: 48px; min-height: 44px; padding: 0 8px; border: 1px solid var(--green-dim); border-radius: 4px;
-  background: rgba(4,14,8,.85); color: var(--green); font-size: 12px; letter-spacing: .06em; }
-.scopebtn:active { background: var(--green-faint); }
-#b-zoom { right: 6px; bottom: 6px; }
-.cyc { top: 50%; transform: translateY(-50%); min-width: 44px; min-height: 64px; padding: 0; font-size: 22px; line-height: 1; opacity: .88; }
-#b-prev { left: 4px; } #b-next { right: 4px; }
-.cyc.down { filter: brightness(1.5); transform: translateY(-50%) scale(.94); }
-#b-zoom b { display: block; font-size: 9px; color: var(--muted); font-weight: 400; }
+/* ---- V1.3 Pantsir-style scope console: grey bezel, status cells, soft-keys, light-blue glass (the only light panel) ---- */
+#p-scope { position: absolute; z-index: 2; left: 0; top: 0; width: calc(100% - 18px); height: auto; aspect-ratio: 390 / 215; transform-origin: 0 0; will-change: transform;
+  gap: 3px; padding: 3px; color: #16242e;
+  background: linear-gradient(180deg, #d5dad7, #c2c8c5); border: 3px solid #394045; border-radius: 7px;
+  box-shadow: 0 0 0 1px #0a0d0e, 0 2px 8px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.55), inset 0 0 0 1px rgba(0,0,0,.2); }
+#p-scope::before { content: ""; position: absolute; inset: 0; z-index: 7; pointer-events: none; border-radius: 4px;   /* monitor glass glare */
+  background: linear-gradient(118deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.03) 34%, rgba(255,255,255,0) 35%, rgba(255,255,255,0) 100%); }
+#p-scope.night::after { content: ""; position: absolute; inset: 0; z-index: 6; pointer-events: none; background: rgba(2,10,20,.24); }
+#scells { position: relative; z-index: 3; flex: 0 0 17px; display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 2px; pointer-events: none; }
+#stmore { grid-column: 3; grid-row: 1; display: flex; gap: 2px; min-width: 0; }
+#stmore .cell { flex: 1 1 auto; }
+.cell { height: 17px; display: flex; align-items: center; justify-content: center; padding: 0 5px; border: 1px solid #969d9a; border-radius: 2px;
+  background: #b8bebb; color: #69726f; font: 700 10px/1 var(--mono); letter-spacing: .03em; white-space: nowrap; overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.35); }
+.cell.ok { background: #5fc26d; border-color: #347f45; color: #03250b; }
+.cell.amber { background: #f3b433; border-color: #a8720c; color: #2a1a00; }
+.cell.red { background: #dc3027; border-color: #8f1810; color: #fff; }
+.cell.info { background: #eef1ef; border-color: #969d9a; color: #16242e; }
+.cell.blink { animation: cblink 1s steps(2) infinite; }
+@keyframes cblink { 50% { background: #b8bebb; border-color: #969d9a; color: #69726f; } }
+#sbody { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: row-reverse; gap: 3px; }   /* V1.4.1: soft keys on the RIGHT (right thumb), height strip on the left */
+#skeys { position: relative; z-index: 3; flex: 0 0 46px; display: flex; flex-direction: column; gap: 3px; }
+#ppi { flex: 0 0 auto; width: 50%; }
+#scope { position: absolute; z-index: 2; left: 0; top: 0; width: 20px; height: 20px; display: block; touch-action: none; }
+#hcol { position: relative; z-index: 3; flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+#hstrip { display: block; flex: 1 1 auto; min-height: 0; width: 100%; border-radius: 2px; touch-action: none; }
+/* soft-keys: flat grey keys with engraved labels (lit red/amber when they need you) */
+.skey { position: relative; flex: 1 1 0; min-width: 44px; min-height: 44px; padding: 0 2px; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 2px; border: 1px solid #7c8480; border-radius: 3px; color: #17252e; font: 700 11px/1 var(--mono); letter-spacing: .03em;
+  background: linear-gradient(180deg, #e4e8e6, #b9c0bc); text-shadow: 0 1px 0 rgba(255,255,255,.65); -webkit-touch-callout: none;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.85), inset 0 -2px 0 rgba(0,0,0,.1), 0 1px 1px rgba(0,0,0,.35); }
+.skey[hidden] { display: none; }
+.skey > * { pointer-events: none; }
+.skey i { font-style: normal; font-size: 8px; letter-spacing: .1em; color: #3a4850; }
+.skey b { font-size: 15px; letter-spacing: 0; }
+.skey.cyc { font-size: 19px; }
+.skey.down { background: linear-gradient(180deg, #a9b0ac, #c8cecb); box-shadow: inset 0 1px 3px rgba(0,0,0,.4); transform: translateY(1px); }
+#b-repair { flex: 0 0 44px; flex-direction: row; gap: 6px; font-size: 12px; }
+#b-repair i { font-size: 9px; letter-spacing: .04em; }
+#b-repair.urgent { background: linear-gradient(180deg, #f0584c, #c42118); border-color: #7a120b; color: #fff; text-shadow: 0 -1px 0 rgba(0,0,0,.3); animation: rpulse 1s infinite; }
+#b-repair.urgent i { color: #ffe1dd; }
+#b-repair.busy { background: linear-gradient(180deg, #f8d06c, #dfa322); border-color: #8f6208; color: #2a1a00; }
+@keyframes rpulse { 50% { filter: brightness(1.28); } }
+.lchip.doc { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; padding: 2px; }
+.lchip.doc b { font-size: 13px; color: var(--text); } .lchip.doc span { font-size: 9px; color: var(--muted); letter-spacing: .05em; }
+.lchip.doc.on { border-color: #ffb020; } .lchip.doc.on b, .lchip.doc.on span { color: #ffb020; }
 #tabs { flex: 0 0 auto; display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; }
 .tab { min-height: 44px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px 5px 0 0; background: #0a0f0c;
   display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; text-align: left; overflow: hidden; }
@@ -61,7 +99,7 @@ button { font: inherit; color: inherit; background: none; border: 0; padding: 0;
 .psum .warn { color: var(--amber); }
 .tab.alert .ptitle { color: var(--amber); }
 .tab.alert .ptitle::after { content: " \25CF"; }
-#tabbody { flex: 1 1 42%; margin-top: -3px; border-top-left-radius: 0; border-top-right-radius: 0; border-color: var(--line-hi); }
+#tabbody { flex: 1 1 auto; margin-top: -3px; border-top-left-radius: 0; border-top-right-radius: 0; border-color: var(--line-hi); }
 .pbody { display: none; flex: 1 1 auto; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
 .pbody.active { display: block; }
 
@@ -98,7 +136,7 @@ tr[data-act] { cursor: pointer; }
 .log li.sys { color: var(--green-mid); }
 
 /* ---- launcher strip (always visible, directly above the thumb zone) ---- */
-#lstrip { flex: 0 0 auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 3px 4px 0; background: #080a09; }
+#lstrip { flex: 0 0 auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)) 44px; gap: 4px; padding: 3px 4px 0; background: #080a09; }
 .lchip { position: relative; height: var(--ls); min-width: 44px; padding: 3px 5px; border: 1px solid var(--line-hi); border-radius: 5px; background: #0c130f;
   display: flex; flex-direction: column; justify-content: space-between; align-items: stretch; text-align: left; overflow: hidden;
   color: var(--text); font-size: 10px; line-height: 12px; -webkit-touch-callout: none; }
@@ -122,6 +160,7 @@ tr[data-act] { cursor: pointer; }
 .lchip.asg .lc-h, .lchip.asg .lc-h b, .lchip.asg .lc-s { color: #1a1000; }
 .lchip.asg .lc-p i, .lchip.asg .lc-p u s { background: #1a1000; } .lchip.asg .lc-p i.e, .lchip.asg .lc-p u { background: rgba(26,16,0,.25); }
 .lchip:active { filter: brightness(1.3); }
+@media (max-width: 374px) { .lchip .lc-s { letter-spacing: 0; } }   /* "ROE TIGHT" fits a 360 px phone's chip */
 
 /* ---- thumb zone ---- */
 #thumbzone { flex: 0 0 auto; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 4px;
@@ -157,20 +196,19 @@ tr[data-act] { cursor: pointer; }
 #b-fire.dis { opacity: .55; }
 #b-fire.dis .cover { filter: grayscale(.85) brightness(.55); }
 
-/* ---- scope overlays: alert strip, ROE pill, ARM banner ---- */
-#alertstrip { position: absolute; left: 0; right: 0; top: 0; height: 24px; z-index: 3; display: none; align-items: center; justify-content: center;
-  gap: 8px; font-size: 12px; font-weight: 700; letter-spacing: .08em; pointer-events: none; white-space: nowrap; overflow: hidden;
-  background: rgba(70,8,5,.94); color: #ffd2cc; border-bottom: 1px solid var(--red); }
+/* ---- status-row alarm: #alertstrip lights over the right-hand cells (TX + ROE stay visible), pulsing red ---- */
+#alertstrip { grid-column: 3; grid-row: 1; height: 17px; display: none; align-items: center; justify-content: center; gap: 5px; padding: 0 5px;
+  border: 1px solid #7e130c; border-radius: 2px; background: #d8241b; color: #fff; font: 700 10px/1 var(--mono); letter-spacing: .02em;
+  white-space: nowrap; overflow: hidden; pointer-events: none; box-shadow: inset 0 1px 0 rgba(255,255,255,.25); }
 #alertstrip.on { display: flex; }
 #alertstrip.red { animation: pulse 1s ease-in-out infinite; }
-#alertstrip.amber { background: rgba(60,40,4,.94); color: var(--amber); border-bottom-color: var(--amber); }
-#alertstrip small { font-weight: 400; opacity: .8; }
-@keyframes pulse { 50% { background: rgba(140,16,10,.94); } }
-#roepill { position: absolute; left: 50%; top: 3px; transform: translateX(-50%); z-index: 2; pointer-events: none; background: rgba(2,8,4,.88);
-  font-weight: 700; transition: top .15s; }
-#p-scope.alerting #roepill { top: 28px; }
+#alertstrip.amber { background: #f3b433; border-color: #a8720c; color: #2a1a00; }
+#alertstrip small { font: inherit; opacity: .85; }
+@keyframes pulse { 50% { background: #8a120b; } }
+@media (max-width: 374px) { .cell { padding: 0 3px; font-size: 9.5px; } #alertstrip { font-size: 9px; letter-spacing: 0; } }
+@media (max-width: 340px) { #alertstrip small { display: none; } }
 #roepill.flash { animation: flash .35s steps(2) 8; }
-@keyframes flash { 50% { background: currentColor; color: #000; } }
+@keyframes flash { 50% { background: #16242e; border-color: #16242e; color: #fff; } }
 #armban { display: none !important; }   /* retired: the alert strip carries ARM + countdown */
 
 /* ---- track tab extras ---- */
@@ -229,6 +267,7 @@ td.pri { color: var(--amber); }
   background: radial-gradient(ellipse at 50% 40%, #1a0c08 0%, #050707 70%); z-index: 10; text-align: center; padding: 24px; }
 /* ---- v19 cover page: transparent over the live 3-D scene ---- */
 body.titling #hatch { position: fixed; inset: 0; z-index: 1; flex: none; border: 0; }
+body.titling #p-scope, body.titling #eo { visibility: hidden !important; }
 body.titling #desk, body.titling #lstrip, body.titling #thumbzone, body.titling #hud, body.titling #m-pause { visibility: hidden; }
 body.titling #meta { background: linear-gradient(180deg, rgba(5,4,6,.5) 0%, rgba(5,4,6,.62) 45%, rgba(5,4,6,.1) 64%, rgba(5,4,6,.05) 72%, rgba(4,3,3,.55) 100%); }
 body.titling #meta h1 { font-family: "Russo One", Impact, "Arial Black", sans-serif; font-weight: 400; font-size: 44px; letter-spacing: .1em;
@@ -293,27 +332,80 @@ body.titling #meta .sub { color: #e6b8a4; text-shadow: 0 1px 3px #000; }
 #rotate .icon { width: 44px; height: 72px; border: 2px solid var(--amber); border-radius: 8px; }
 @media (orientation: landscape) and (max-height: 560px) { #rotate { display: flex; } }
 /* fast buttons: no pan/zoom gestures may steal the touch; instant pressed feedback */
-#thumbzone, #lstrip, #b-zoom, .cyc, .tz, .lchip { touch-action: none; }
-.tz.down, .lchip.down, #b-zoom.down { filter: brightness(1.5); transform: scale(.96); }
+#thumbzone, #lstrip, .skey, .tz, .lchip { touch-action: none; }
+.tz.down, .lchip.down { filter: brightness(1.5); transform: scale(.96); }
+
+/* ==== V1.4 keyboard shelf: the bottom panel is the Pantsir console's lower desk (off-white panel, engraved grey keys) ==== */
+#desk, #lstrip, #thumbzone {
+  --panel: #eef0ec; --panel-hi: #f6f7f4; --line: #a9afab; --line-hi: #8a908c; --text: #1d2327; --muted: #5f676b;
+  --green: #16733a; --green-mid: #1f8a47; --green-dim: #7fa68b; --green-faint: #cde6d4;
+  --amber: #a86400; --cyan: #0a6f95; --red: #c0281b; color: var(--text); }
+#desk { background: linear-gradient(#cfd3ce, #c1c6c1); box-shadow: inset 0 4px 0 #9aa09c, inset 0 6px 10px rgba(0,0,0,.22); padding-top: 7px; }
+#desk .tab { background: linear-gradient(#eceee9, #cfd4cf); border-color: #9aa09c; box-shadow: inset 0 -2px 0 rgba(0,0,0,.12), 0 1px 0 rgba(255,255,255,.5); }
+#desk .tab .ptitle { color: #2b3034; }
+#desk .tab.active { background: var(--panel); border-color: var(--line-hi); border-bottom-color: var(--panel); box-shadow: none; }
+#desk .tab.active .ptitle { color: #0f5f2e; }
+#desk .tab.alert .ptitle { color: var(--amber); }
+#desk #tabbody { background: var(--panel); border-color: var(--line-hi); box-shadow: inset 0 1px 5px rgba(0,0,0,.14); }
+#desk .kv div, #desk .chip, #desk .erow { background: #fbfbf9; }
+#desk .kv span { color: #12301f; }
+#desk .erow.asg, #desk .msgs li.need { background: #fbe7c4; }
+#desk tr.sel td { background: #cde6d4; color: #0f5f2e; }
+#desk .btn { background: linear-gradient(#f3f4f1, #d6dad5); border-color: #8a908c; box-shadow: inset 0 -2px 0 rgba(0,0,0,.12); }
+#desk .btn:active, #desk .btn.sel { background: #cde6d4; border-color: var(--green); }
+#desk .log li .ts { color: #7a8286; }
+#lstrip { background: #c7cbc6; padding-top: 4px; }
+.lchip { background: linear-gradient(#f3f4f1, #d3d7d2); border-color: #8a908c; box-shadow: inset 0 -2px 0 rgba(0,0,0,.13), 0 1px 0 rgba(255,255,255,.5); }
+.lchip .lc-h { color: #5f676b; }
+.lchip.ok { background: linear-gradient(#eff8f1, #cfe8d5); border-color: #1f8a47; }
+.lchip.no { background: #d8dcd7; border-color: #a9afab; }
+.lchip.asg { background: linear-gradient(#ffd27a, #efa81f); border-color: #8f6208; box-shadow: 0 0 9px rgba(239,168,31,.55), inset 0 -2px 0 rgba(0,0,0,.15); }
+#thumbzone { background: #bec3be; border-top-color: #9aa09c; }
+.tz { background: linear-gradient(#f3f4f1, #d1d5d0); border-color: #858b87; color: #1d2327; font-weight: 700;
+  box-shadow: inset 0 -3px 0 rgba(0,0,0,.15), 0 1px 0 rgba(255,255,255,.55); }
+.tz:active:not(.dis) { background: #c6cbc6; box-shadow: inset 0 2px 3px rgba(0,0,0,.2); }
+.tz.dis { opacity: .5; }
+#b-radar.on { border-color: #1f8a47; color: #16733a; box-shadow: inset 0 0 0 2px rgba(31,138,71,.35), inset 0 -3px 0 rgba(0,0,0,.15); }
+#b-radar.off { border-color: #a86400; color: #a86400; }
+#b-radar.hot { border-color: #c0281b; color: #c0281b; box-shadow: inset 0 0 0 2px rgba(192,40,27,.35); }
+#b-iff.ok { color: #16733a; border-color: #1f8a47; } #b-iff.amber, #b-iff.pend { color: #a86400; border-color: #a86400; } #b-iff.red { color: #c0281b; border-color: #c0281b; }
+#b-friend.sel { border-color: var(--cyan); background: #d3e6f2; }
+#b-hostile.sel { border-color: var(--red); background: #f5d3cf; }
+#b-assign.sel { border-color: var(--amber); background: #fbe7c4; }
+#b-fire { color: #fff; border-color: #6e1109; background: linear-gradient(#b52a1d, #7c150c); }
+#b-fire.armed { background: linear-gradient(#d4382a, #8f170d); border-color: #4d0a05; }
 </style>
 
 
 <div id="app">
   <div id="hatch">
     <canvas id="view"></canvas>
+    <section class="panel" id="p-scope">
+      <div id="scells">
+        <span class="cell ok" id="st-tx">TX 00:00</span>
+        <span class="cell amber" id="roepill">ROE TIGHT</span>
+        <div id="stmore"><span class="cell" id="st-trk">TRK 0</span><span class="cell ok" id="st-rdr">RDR 100%</span><span class="cell" id="st-jam">JAM</span><span class="cell" id="st-deg">DEGR</span></div>
+        <div id="alertstrip" role="alert"></div>
+      </div>
+      <div id="sbody">
+        <div id="skeys">
+          <button class="skey cyc" id="b-prev" data-act="cyc" data-d="-1" aria-label="Previous target">&#9664;<i>TGT</i></button>
+          <button class="skey cyc" id="b-next" data-act="cyc" data-d="1" aria-label="Next target">&#9654;<i>TGT</i></button>
+          <button class="skey" id="b-zoom" data-act="zoom"><i>ZOOM</i><b>100</b><i>KM</i></button>
+        </div>
+        <div id="ppi"></div>
+        <canvas id="scope" aria-label="Radar scope"></canvas>
+        <div id="hcol">
+          <canvas id="hstrip" aria-label="Range-height strip"></canvas>
+          <button class="skey" id="b-repair" data-act="repair" hidden>REPAIR<i>RADAR</i></button>
+        </div>
+      </div>
+      <div id="armban" hidden></div>
+    </section>
     <div id="hud"><span id="title">RED SKIES</span><span id="clock">--:-- / 08:00</span></div>
     <div id="debug" hidden></div>
   </div>
   <div id="desk">
-    <section class="panel" id="p-scope">
-      <canvas id="scope" aria-label="Radar scope"></canvas>
-      <div id="alertstrip" role="alert"></div>
-      <span id="roepill" class="pill amber">TIGHT</span>
-      <div id="armban" hidden></div>
-      <button class="scopebtn" id="b-zoom" data-act="zoom">100 KM<b>ZOOM</b></button>
-      <button class="scopebtn cyc" id="b-prev" data-act="cyc" data-d="-1" aria-label="Previous target">&#9664;</button>
-      <button class="scopebtn cyc" id="b-next" data-act="cyc" data-d="1" aria-label="Next target">&#9654;</button>
-    </section>
     <nav id="tabs" role="tablist">
       <button class="tab active" id="tab-track" data-tab="track" role="tab"><span class="ptitle">TRACK / IFF</span><span class="psum" id="sum-track"></span></button>
       <button class="tab" id="tab-battery" data-tab="battery" role="tab"><span class="ptitle">BATTERY</span><span class="psum" id="sum-battery"></span></button>

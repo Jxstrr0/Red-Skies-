@@ -21,7 +21,7 @@
   };
 
   let started = false, prepared = false, acc = 0, last = 0, frames = 0, fpsT = 0, fps = 0, debugOn = false;
-  let paused = false, curDef = null;                          // pause freezes the sim step only; render keeps running
+  let paused = false, held = false, curDef = null;                          // pause freezes the sim step only; render keeps running
   RS.bus.on('SHIFT_START', p => { curDef = p.def || curDef; });
   const $ = id => document.getElementById(id);
 
@@ -36,7 +36,7 @@
     last = now;
     acc += dt;
     let n = 0;
-    if (paused) acc = 0;
+    if (paused || held) acc = 0;
     while (acc >= RS.SIM_DT && n < 5) { RS.sim.step(); acc -= RS.SIM_DT; n++; }
     if (n === 5) acc = 0;                                  // clamp catch-up
     RS.scene.render(dt, RS.sim.state);
@@ -95,14 +95,18 @@
   /** Restart the current shift def (ends the running one with reason 'restart' first so listeners clean up). */
   function restart() {
     if (!started) return start();
-    paused = false;
+    if (paused) { paused = false; RS.bus.emit('PAUSE', { paused: false }); }
     if (RS.sim.state.shift.running) RS.sim.endShift('restart');
     RS.sim.startShift(curDef || RS.content.shifts[0]);
   }
-  function pause() { if (!started) return false; paused = true; return true; }
-  function resume() { paused = false; acc = 0; return true; }
+  function pause() { if (!started) return false; if (!paused) { paused = true; RS.bus.emit('PAUSE', { paused: true }); } return true; }
+  function resume() { const was = paused; paused = false; acc = 0; if (was) RS.bus.emit('PAUSE', { paused: false }); return true; }
 
-  RS.main = { start, restart, resize, pause, resume,
+  /** Freeze the sim silently (no PAUSE event, audio/voice keep going). Used by the tutorial for text-only steps. */
+  function hold(v) { held = !!v; if (!held) acc = 0; return held; }
+  RS.bus.on('SHIFT_START', () => { held = false; });
+
+  RS.main = { start, restart, resize, pause, resume, hold, get held() { return held; },
     get fps() { return fps; }, get started() { return started; }, get paused() { return paused; }, get def() { return curDef; } };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 })();
