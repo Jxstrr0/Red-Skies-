@@ -1,7 +1,7 @@
 /* =====================================================================
    RED SKIES — tutorial.js   RS.tutorial : guided "Training Watch" (V1.1).
    Plays a scripted, forgiving shift (day/clear, ROE TIGHT, no random events): a friendly CAP fighter with a radio call,
-   a slow hostile jet in Lance range, then a small drone for the Dart. A coach card (top of the screen, over the 3-D
+   a slow hostile jet in Lance range, then a small drone for the Dart. Every shot the player fires hits (ShiftDef.sureHit, V1.4.4). A coach card (top of the screen, over the 3-D
    view, never over the thumb zone or the element it points at) walks the player through the real controls; a pulsing
    ring sits on the control (or scope contact) to use. Steps advance on real bus events / sim state, so doing things out
    of order is fine (a step whose goal is already met is skipped). Text-only steps freeze the sim with RS.main.hold(true).
@@ -18,11 +18,11 @@
   /** The training ShiftDef (fresh copy each start). */
   function makeDef() {
     return {
-      id: 'TRAIN', name: 'Training Watch', tutorial: true, duration: 1800, roe: 'TIGHT',
+      id: 'TRAIN', name: 'Training Watch', tutorial: true, duration: 1800, roe: 'TIGHT', sureHit: true,   // training: every shot kills
       weather: { time: 'day', sky: 'clear' }, reserve: { lance: 12, dart: 12, harrow: 1800 }, events: [], roeChanges: [],
       spawns: [
         { t: 0, kind: 'jet_friend', callsign: 'Viper 1', x: -16, y: 13, alt: 6000, hdg: 0, spd: 200, orbit: { cx: -14, cy: 12, r: 6 } },
-        { t: 0, kind: 'jet_hostile', x: 31, y: 37, alt: 5000, hdg: 220, spd: 170 },          // ~48 km NE, slow, inbound
+        { t: 0, kind: 'jet_hostile', x: 26, y: 31, alt: 5000, hdg: 220, spd: 170 },          // ~40 km NE, slow, inbound (the tracker camera sees 35 km)
         { t: 55, kind: 'drone', x: 8, y: -12, alt: 300, hdg: 326, spd: 40 }                  // ~14 km SE, low and slow (Dart)
       ],
       comms: [
@@ -59,7 +59,7 @@
   let running = false, idx = 0, def = null, raf = 0, starting = false, holding = false, oops = false, skipArm = 0, hint = '', hintStep = -1;
   let card = null, ring = null, lastHtml = '', built = false, zoom0 = 100;
   let F = {};                                           // per-shift flags (launched/killed/gone/missed, cached ids)
-  const resetFlags = () => { F = { ids: {}, seen: {}, launched: {}, killed: {}, gone: {}, missed: {} }; };
+  const resetFlags = () => { F = { ids: {}, seen: {}, launched: {}, killed: {}, gone: {}, missed: {}, shot: {}, camFar: {} }; };
   resetFlags();
 
   const S = () => RS.sim.state;
@@ -80,6 +80,16 @@
   const sel = r => !!F.ids[r] && S().selectedId === F.ids[r];
   const over = r => F.killed[r] || F.gone[r];
   const inFlight = r => (S().missiles || []).some(m => m.targetId === F.ids[r]);
+  /** What the tracker camera shows of role r: {s:'seen'} (in its range), {s:'far', km, max} (aimed at it, too far away),
+   *  {s:'other'} (watching something else or nothing), or null (no camera, e.g. node tests). */
+  function cam(r) {
+    let e = null;
+    try { e = RS.scene && RS.scene.eo ? RS.scene.eo.state : null; } catch (x) { e = null; }
+    if (!e || !e.on) return null;
+    if (!F.ids[r] || e.trackId !== F.ids[r] || !e.hasTarget) return { s: 'other' };
+    return e.inRange ? { s: 'seen' } : { s: 'far', km: Math.round(e.rangeKm), max: Math.round(e.maxKm) };
+  }
+  const CAM = 'the <b>tracker camera</b> (the small screen at the top right)';
   const lname = id => { const l = S().battery.launchers.find(x => x.id === id); return id + ' ' + (l ? WL[l.weapon] || l.weapon.toUpperCase() : ''); };
 
   /* ---------- steps ----------
@@ -121,11 +131,28 @@
         : 'Tap <b>ASSIGN</b> to give it a launcher.'; } },
     { id: 'fire', need: 'jet', wait: () => F.launched.jet || over('jet'), at: () => '#b-fire',
       text: () => 'Weapons <span class="a">TIGHT</span>: you may fire at HOSTILE tracks. <b>Press and hold FIRE</b> until the ring fills.' },
-    { id: 'cam', next: true, hold: false, wait: () => over('jet') || (!inFlight('jet') && F.missed.jet), at: () => missileAt('jet'),
-      text: () => 'Missile away! The small arrow on the scope is your missile. The <b>tracker camera</b> (the small window in the top view) is locked on your target: watch the splash. <b>Tip:</b> tap a missile to aim the camera at its target; tap the camera to make it big.' },
-    { id: 'j_kill', wait: () => over('jet'), at: trackAt('jet'), text: () => 'Wait for it to reach the target...' },
+    // V1.4.4: the camera only sees ~35 km, so these follow what it really shows (OUT OF RANGE → picked up); NEXT is offered
+    // while the missile flies, and the step moves on by itself at the splash
+    { id: 'cam', next: () => !over('jet'), hold: false, wait: () => over('jet') || (!inFlight('jet') && F.missed.jet),
+      at: () => { const c = cam('jet'); return c && c.s === 'seen' ? '#eo-fr' : missileAt('jet'); },
+      text: () => {
+        const c = cam('jet');
+        if (c && c.s === 'seen') return `${CAM[0].toUpperCase() + CAM.slice(1)} has picked up the jet: <b>watch the splash!</b> The small arrow on the scope is your missile. <b>Tip:</b> tap the camera to make it big.`;
+        if (c && c.s === 'far') return `Missile away! The small arrow on the scope is your missile. ${CAM[0].toUpperCase() + CAM.slice(1)} is aimed at the jet but says <span class="r">OUT OF RANGE</span>: it sees about ${c.max} km and the jet is ${c.km} km away. It picks the jet up as it comes closer.`;
+        return `Missile away! The small arrow on the scope is your missile. <b>Tip:</b> tap your missile or the jet to aim ${CAM} at it; tap the camera to make it big.`;
+      } },
+    { id: 'j_kill', wait: () => over('jet'),
+      at: () => { const c = cam('jet'); return c && c.s === 'seen' ? '#eo-fr' : F.ids.jet ? { track: F.ids.jet } : '#scope'; },
+      text: () => {
+        const c = cam('jet');
+        if (c && c.s === 'seen') return 'The camera has the jet: <b>watch the splash!</b>';
+        if (c && c.s === 'far') return `Wait for it to reach the target. The camera picks the jet up inside about ${c.max} km (it is ${c.km} km away now).`;
+        return 'Wait for it to reach the target...';
+      } },
     { id: 'splash', next: true, at: () => null,
-      text: () => F.killed.jet ? '<b>Splash!</b> Target destroyed. Nice work.' : 'It turned and ran. The base is safe, and that counts too.' },
+      text: () => !F.killed.jet ? 'It got past you this time. On a real watch, fire before it reaches the base.'
+        : F.camFar.jet ? '<b>Splash!</b> Target destroyed. It went down beyond the camera\'s reach, so the camera only showed the SPLASH tag. Nice work.'
+          : '<b>Splash!</b> Target destroyed. Nice work.' },
     { id: 'd_sel', wait: () => sel('drone') || over('drone'), at: trackAt('drone'),
       text: () => F.ids.drone ? 'A new contact is creeping in <b>low and slow</b> from the south-east. Tap it.'
         : 'Keep watching the scope: something small is coming from the south-east.' },
@@ -143,7 +170,8 @@
       text: () => (F.killed.drone ? '<b>Got it!</b> ' : '') + 'The <b>ROE</b> tag on the scope is your order: TIGHT = only HOSTILE tracks, ' +
         'HOLD = no firing, FREE = anything not marked FRIEND. HQ may change it.' },
     { id: 'salvo', next: true, at: () => '#b-doc',
-      text: () => '<b>1× SHOT</b> fires one missile per press. Tap it for <b>2× SALVO</b>: two missiles, surer, but it uses more ammo.' },
+      text: () => '<b>1× SHOT</b> fires one missile per press. Tap it for <b>2× SALVO</b>: two missiles, surer, but it uses more ammo. ' +
+        'In training every shot hits; on a real watch shots can miss and jets can dodge.' },
     { id: 'more', next: true, at: () => '#m-pause',
       text: () => 'If enemy missiles damage the radar, a <b>REPAIR</b> button appears on the scope. <b>II</b> pauses the game.' },
     { id: 'finish', next: true, final: true, at: () => null,
@@ -295,12 +323,22 @@
     'Always check IFF and the radio before you call HOSTILE. Let\'s try that again.';
 
   /* ---------- bus ---------- */
-  const roleOfId = id => { for (const r in F.ids) if (F.ids[r] === id) return r; const k = id && truth(id); return k ? role({ id, x: 0, y: 0 }) : null; };
+  const roleOfId = id => {
+    if (id && F.shot[id]) return F.shot[id];                 // V1.4.4: a track we shot at (it may have faded since: radar off)
+    for (const r in F.ids) if (F.ids[r] === id) return r;
+    const k = id && truth(id); return k ? role({ id, x: 0, y: 0 }) : null;
+  };
   function bindBus() {
     const on = RS.bus.on;
-    on('LAUNCH', p => { if (!running) return; const r = roleOfId(p.targetId); if (r) { F.launched[r] = true; F.missed[r] = false; } });
-    on('GUN_FIRE', p => { if (!running) return; const r = roleOfId(p.targetId); if (r) { F.launched[r] = true; F.missed[r] = false; } });
-    on('KILL', p => { if (!running) return; const r = roleOfId(p.trackId || p.targetId); if (r) F.killed[r] = true; });
+    const shotAt = p => { if (!running) return; const r = roleOfId(p.targetId); if (r) { F.shot[p.targetId] = r; F.launched[r] = true; F.missed[r] = false; } };
+    on('LAUNCH', shotAt);
+    on('GUN_FIRE', shotAt);
+    on('KILL', p => {
+      if (!running) return;
+      const r = roleOfId(p.trackId || p.targetId); if (!r) return;
+      const c = cam(r); F.camFar[r] = !!(c && c.s === 'far');   // for the splash text: did the camera see it go down?
+      F.killed[r] = true;
+    });
     on('TRACK_LOST', p => {
       if (!running || (p.reason !== 'exited' && p.reason !== 'landed')) return;
       const r = roleOfId(p.id); if (r && !F.killed[r]) F.gone[r] = true;
@@ -314,7 +352,7 @@
         const back = r === 'jet' ? IX('fire') : r === 'drone' ? IX('d_fire') : -1;
         if (back >= 0 && idx > back && idx <= back + (r === 'jet' ? 2 : 1)) {
           F.launched[r] = false; go(back);
-          setHint(r === 'jet' ? 'Missed! Jets can dodge. Hold FIRE again.' : 'Missed! Hold FIRE again.');
+          setHint('Missed! Hold FIRE again.');                 // (training shots always hit: a safety net)
         }
       }, 0);
     });
@@ -331,7 +369,7 @@
     });
     on('FIRE_REJECTED', p => {
       if (!running) return;
-      const m = { roe_tight_not_hostile: 'Tap HOSTILE first: ROE TIGHT only allows HOSTILE tracks.', out_of_range: 'Out of range: wait for it to come closer.',
+      const m = { roe_tight_not_hostile: 'Tap HOSTILE first: ROE TIGHT only allows HOSTILE tracks.', out_of_range: 'Too far for that launcher: wait for it to come closer, or tap another chip.',
         radar_off: 'Turn RADAR on: missiles need it.', not_ready: 'That launcher is reloading. Tap another green chip.', no_rounds: 'That launcher is empty. Tap another chip.' }[p.reason];
       if (m) setHint(m);
     });

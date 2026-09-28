@@ -7,6 +7,7 @@
               camera (emits CAM_FOLLOW {id|null}); a far-ground plane follows the camera so there is ground out to ~110 km.
         title: setTitle(on), titleLaunch(id) → missileId, titleProbe(missileId), titleOn — cover-page cinematic (v19)
         V1.3: eo = { state, setMode('TV'|'IR'|'AUTO'), toggleSwap(), swapped } — EO tracker camera inset (see the EO section);
+              state.rangeKm = slant range to the target, state.maxKm (V1.4.4) = how far the camera sees now (TV/IR, weather);
               debug.eo (internals: stats per pass, camera, render target)
    ===================================================================== */
 (function () {
@@ -1886,13 +1887,13 @@
     R.setScissorTest(false); R.setViewport(0, 0, W, H);
   }
   const eoState = { on: false, swapped: false, mode: 'TV', auto: true, targetId: null, trackId: null, hasTarget: false, holding: false, inRange: true,
-    rangeKm: 0, brgDeg: 0, elDeg: 0, fovDeg: FOV_IDLE, zoom: 1, gate: null, rect: null, slewing: false, status: 'NO TRACK', event: null, kind: null };
+    rangeKm: 0, maxKm: 0, brgDeg: 0, elDeg: 0, fovDeg: FOV_IDLE, zoom: 1, gate: null, rect: null, slewing: false, status: 'NO TRACK', event: null, kind: null };
   const eoApi = {
     get state() {
       const E = eo, s = eoState;
       s.on = E.on; s.swapped = E.swapped; s.mode = E.mode; s.auto = !E.manual; s.targetId = E.tgtId; s.trackId = E.trackId; s.kind = E.kind;
       s.hasTarget = E.hasTarget; s.holding = E.holding; s.inRange = E.inRange; s.slewing = E.slewing;
-      s.rangeKm = +E.rangeKm.toFixed(2); s.brgDeg = +E.az.toFixed(1); s.elDeg = +E.el.toFixed(2); s.fovDeg = +E.fov.toFixed(3);
+      s.rangeKm = +E.rangeKm.toFixed(2); s.maxKm = +(E.rangeMax / 1000).toFixed(1); s.brgDeg = +E.az.toFixed(1); s.elDeg = +E.el.toFixed(2); s.fovDeg = +E.fov.toFixed(3);
       s.zoom = +(FOV_MAX / E.fov).toFixed(1); s.gate = E.gateOn ? E.gate : null; s.rect = E.swapped ? E.rectS : Q.okE ? E.rectL : E.rectN; s.event = E.event;
       s.status = !E.on ? 'OFF' : E.holding ? 'HOLD' : !E.hasTarget ? 'NO TRACK' : !E.inRange ? 'OUT OF RANGE' : E.slewing ? 'SLEWING' : 'TRACK';
       return s;

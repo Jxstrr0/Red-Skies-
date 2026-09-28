@@ -32,7 +32,7 @@ To play from GitHub, enable **Settings → Pages** for this repository and serve
 - **Grading:** each shift is graded A–F. The score is weighted 40 % on asset health
   and 20 % each on leakers, ammo efficiency and reaction time. Fratricide or losing
   the defended asset is an automatic F.
-- **Modes:** a guided *Training Watch*, a six-shift campaign (*First Watch* to
+- **Modes:** a guided *Training Watch* (every shot you fire in it hits), a six-shift campaign (*First Watch* to
   *Red Skies*, each shift with three mission variants) with briefings, debriefs and a
   resupply shop, seeded *Free watch* skirmishes, and an endless *Survival* mode.
   Progress is saved in `localStorage` (keys prefixed `redskies.v1.`).
