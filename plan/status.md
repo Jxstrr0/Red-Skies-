@@ -46,6 +46,13 @@ Read this first in a new session; it replaces re-exploring the code. Update it a
   - The tutorial remembers what each shot was fired at, so a kill after the track faded (radar off) still counts. Before, the training got stuck.
   - Reworded: the salvo step (training shots always hit; real ones can miss), the miss hint and the out-of-range hint.
   - New `test/training.test.js`.
+  - Follow-up after verification:
+    - The OUT OF RANGE card is shorter, so it fits a 360 px phone without covering the camera.
+    - On camera steps the card keeps clear of the camera. A card that fits nowhere goes where it covers the least (it used to jump to the top).
+    - The jet's distance shows to 0.1 km (like the camera's readout) and always reads above the camera's reach.
+    - The text drops "(top right)" and the "make it big" tip when the camera fills the view.
+    - Watching steps show "watching…" instead of "your move". The out-of-range hint also covers "too high" (gun vs the 5000 m jet).
+    - A salvo's spare round vanishes with the kill.
 - **1.4.3.0**
   - Batch 1 (bug fixes):
     - SALVO second round re-checks ROE, FRIEND, assignment, radar and the fire-control solution.

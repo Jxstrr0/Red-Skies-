@@ -2673,6 +2673,8 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
       if (!g.e.dead && (sureHit || rand() < g.pk)) kill(g.e, WP.HARROW, g.trackId, g.key);
       else if (!(sureHit && g.e.killed)) miss(null, g.trackId);
     }
+    // training: a salvo's spare round vanishes with the kill (the same step), not a step later (the tutorial may freeze the sim then)
+    if (sureHit) for (let i = s.missiles.length - 1; i >= 0; i--) { const m = s.missiles[i], P = mpriv[m.id]; if (P && P.ent.dead && P.ent.killed) { s.missiles.splice(i, 1); delete mpriv[m.id]; } }
     const G1 = launcher('G1');
     if (s.gun.firing && s.t >= gunUntil) { s.gun.firing = false; s.gun.targetId = null; if (G1.reloadT <= 0) G1.ready = true; }
     // V1.4.3: an empty launcher reloads as soon as free reserve exists (a reload refused because another launcher had the last
@@ -13804,15 +13806,20 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
   const over = r => F.killed[r] || F.gone[r];
   const inFlight = r => (S().missiles || []).some(m => m.targetId === F.ids[r]);
   /** What the tracker camera shows of role r: {s:'seen'} (in its range), {s:'far', km, max} (aimed at it, too far away),
-   *  {s:'other'} (watching something else or nothing), or null (no camera, e.g. node tests). */
+   *  {s:'other'} (watching something else or nothing), or null (no camera, e.g. node tests). big: swapped to fill the view.
+   *  far: max = whole km it sees, km = the jet's distance to 0.1 km like the camera's own readout, always shown above max. */
   function cam(r) {
     let e = null;
     try { e = RS.scene && RS.scene.eo ? RS.scene.eo.state : null; } catch (x) { e = null; }
     if (!e || !e.on) return null;
-    if (!F.ids[r] || e.trackId !== F.ids[r] || !e.hasTarget) return { s: 'other' };
-    return e.inRange ? { s: 'seen' } : { s: 'far', km: Math.round(e.rangeKm), max: Math.round(e.maxKm) };
+    const big = !!e.swapped;
+    if (!F.ids[r] || e.trackId !== F.ids[r] || !e.hasTarget) return { s: 'other', big };
+    if (e.inRange) return { s: 'seen', big };
+    const max = Math.floor(e.maxKm);
+    return { s: 'far', big, max, km: Math.max(+e.rangeKm.toFixed(1), max + 0.1).toFixed(1) };
   }
-  const CAM = 'the <b>tracker camera</b> (the small screen at the top right)';
+  /** "the tracker camera" (+ where it is, unless it fills the view); up = capital first letter */
+  const camName = (c, up) => (up ? 'The' : 'the') + ' <b>tracker camera</b>' + (c && c.big ? '' : ' (top right)');
   const lname = id => { const l = S().battery.launchers.find(x => x.id === id); return id + ' ' + (l ? WL[l.weapon] || l.weapon.toUpperCase() : ''); };
 
   /* ---------- steps ----------
@@ -13857,22 +13864,24 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     // V1.4.4: the camera only sees ~35 km, so these follow what it really shows (OUT OF RANGE → picked up); NEXT is offered
     // while the missile flies, and the step moves on by itself at the splash
     { id: 'cam', next: () => !over('jet'), hold: false, wait: () => over('jet') || (!inFlight('jet') && F.missed.jet),
-      at: () => { const c = cam('jet'); return c && c.s === 'seen' ? '#eo-fr' : missileAt('jet'); },
+      at: () => { const c = cam('jet'); return c && c.s === 'seen' ? '#eo-fr' : missileAt('jet'); }, eye: true,
       text: () => {
         const c = cam('jet');
-        if (c && c.s === 'seen') return `${CAM[0].toUpperCase() + CAM.slice(1)} has picked up the jet: <b>watch the splash!</b> The small arrow on the scope is your missile. <b>Tip:</b> tap the camera to make it big.`;
-        if (c && c.s === 'far') return `Missile away! The small arrow on the scope is your missile. ${CAM[0].toUpperCase() + CAM.slice(1)} is aimed at the jet but says <span class="r">OUT OF RANGE</span>: it sees about ${c.max} km and the jet is ${c.km} km away. It picks the jet up as it comes closer.`;
-        return `Missile away! The small arrow on the scope is your missile. <b>Tip:</b> tap your missile or the jet to aim ${CAM} at it; tap the camera to make it big.`;
+        if (c && c.s === 'seen') return `${camName(c, true)} has picked up the jet: <b>watch the splash!</b> The small arrow on the scope is your missile.` +
+          (c.big ? '' : ' <b>Tip:</b> tap the camera to make it big.');
+        if (c && c.s === 'far') return `Missile away! The small arrow on the scope is your missile. ${camName(c, true)} says <span class="r">OUT OF RANGE</span>: ` +
+          `it sees about ${c.max} km and the jet is ${c.km} km away. It picks the jet up as it comes closer.`;
+        return `Missile away! The small arrow on the scope is your missile. <b>Tip:</b> tap the jet (or your missile) to aim ${camName(c)} at the jet.`;
       } },
-    { id: 'j_kill', wait: () => over('jet'),
+    { id: 'j_kill', wait: () => over('jet'), watch: true, eye: true,
       at: () => { const c = cam('jet'); return c && c.s === 'seen' ? '#eo-fr' : F.ids.jet ? { track: F.ids.jet } : '#scope'; },
       text: () => {
         const c = cam('jet');
         if (c && c.s === 'seen') return 'The camera has the jet: <b>watch the splash!</b>';
-        if (c && c.s === 'far') return `Wait for it to reach the target. The camera picks the jet up inside about ${c.max} km (it is ${c.km} km away now).`;
-        return 'Wait for it to reach the target...';
+        if (c && c.s === 'far') return `Your missile is on its way. The camera picks the jet up inside about ${c.max} km (the jet is ${c.km} km away now).`;
+        return 'Wait for your missile to reach the jet...';
       } },
-    { id: 'splash', next: true, at: () => null,
+    { id: 'splash', next: true, at: () => null, eye: true,
       text: () => !F.killed.jet ? 'It got past you this time. On a real watch, fire before it reaches the base.'
         : F.camFar.jet ? '<b>Splash!</b> Target destroyed. It went down beyond the camera\'s reach, so the camera only showed the SPLASH tag. Nice work.'
           : '<b>Splash!</b> Target destroyed. Nice work.' },
@@ -13888,7 +13897,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
       text: () => { const t = trk('drone'); return t && t.assigned
         ? `Small and close: the battery picked <b>${lname(t.assigned)}</b>. Anything inside 4 km gets the GUN. <b>Hold FIRE.</b>`
         : 'Tap <b>ASSIGN</b>, then hold <b>FIRE</b>.'; } },
-    { id: 'd_kill', wait: () => over('drone'), at: trackAt('drone'), text: () => 'Watch it go...' },
+    { id: 'd_kill', wait: () => over('drone'), watch: true, at: trackAt('drone'), text: () => 'Watch it go...' },
     { id: 'roe', next: true, at: () => '#roepill',
       text: () => (F.killed.drone ? '<b>Got it!</b> ' : '') + 'The <b>ROE</b> tag on the scope is your order: TIGHT = only HOSTILE tracks, ' +
         'HOLD = no firing, FREE = anything not marked FRIEND. HQ may change it.' },
@@ -13976,7 +13985,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
 
   /** Card slot: over the 3-D view (above the radar console, which it never covers), else the top of the screen, else just above the launcher strip.
    *  Never overlaps the ring target or the launcher strip / thumb zone. */
-  function place(tr) {
+  function place(tr, eye) {
     const app = $('app') || document.body, ab = app.getBoundingClientRect(), hb = ($('hatch') || app).getBoundingClientRect();
     const ls = ($('lstrip') || $('thumbzone') || app).getBoundingClientRect();
     const w = Math.min(ab.width - 16, 440), left = ab.left + (ab.width - w) / 2;
@@ -13985,10 +13994,14 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     if (pb && pb.offsetParent) { const b = pb.getBoundingClientRect(); avoid.push({ l: b.left, t: b.top, r: b.right, b: b.bottom }); }   // keep II reachable
     const ps = $('p-scope'); let psTop = hb.bottom;              // V1.4: the radar console is on the cabin's lower monitor: keep it clear
     if (ps && ps.style.visibility !== 'hidden') { const b = ps.getBoundingClientRect(); if (b.height) { psTop = b.top; avoid.push({ l: b.left, t: b.top, r: b.right, b: b.bottom }); } }
+    if (eye) { const e = $('eo-fr'), b = e && e.getBoundingClientRect(); if (b && b.width && b.height) avoid.push({ l: b.left, t: b.top, r: b.right, b: b.bottom }); }   // V1.4.4: camera steps keep the camera visible
     const hits = t => avoid.some(q => t < q.b + pad && t + h > q.t - pad && left < q.r + pad && left + w > q.l - pad);
     const cands = [psTop - h - 6, Math.max(8, hb.top + 54), floor - h];
     let top = cands.find(t => t >= 0 && t + h <= floor && !hits(t));
-    if (top === undefined) top = Math.max(0, Math.min(cands[0], floor - h));
+    if (top === undefined) {                                     // fits nowhere (small phone): the slot that covers the least
+      const cover = t => avoid.reduce((a, q) => a + Math.max(0, Math.min(t + h, q.b + pad) - Math.max(t, q.t - pad)) * Math.max(0, Math.min(left + w, q.r + pad) - Math.max(left, q.l - pad)), 0);
+      top = cands.map(t => Math.max(0, Math.min(t, floor - h))).reduce((a, t) => cover(t) < cover(a) ? t : a);
+    }
     card.style.top = Math.round(top) + 'px';
   }
 
@@ -14013,7 +14026,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
         text = id ? `First select <b>${id}</b> again: tap it in the ring on the scope.` : 'Wait for the contact to show on the scope again.';
         at = id ? { track: id } : '#scope';
       }
-      if (!next) wait = wait || 'your move ▸';
+      if (!next) wait = wait || (st.watch ? 'watching…' : 'your move ▸');
     }
     setHold(oops || (next && st.hold !== false));
     const nk = STEPS.length, k = Math.min(idx + 1, nk);
@@ -14040,7 +14053,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
       ring.style.width = (r.r - r.l + 2 * g) + 'px'; ring.style.height = (r.b - r.t + 2 * g) + 'px';
     } else ring.className = '';
     card.classList.add('on');
-    place(r);
+    place(r, !oops && !!st.eye);
   }
   const oopsText = () => '<b>Oops, that was a friendly aircraft.</b> In a real watch that ends your shift. ' +
     'Always check IFF and the radio before you call HOSTILE. Let\'s try that again.';
@@ -14092,7 +14105,7 @@ float cPanel(float v, float s){ float fw = fwidth(v); float d = abs(fract(v / s 
     });
     on('FIRE_REJECTED', p => {
       if (!running) return;
-      const m = { roe_tight_not_hostile: 'Tap HOSTILE first: ROE TIGHT only allows HOSTILE tracks.', out_of_range: 'Too far for that launcher: wait for it to come closer, or tap another chip.',
+      const m = { roe_tight_not_hostile: 'Tap HOSTILE first: ROE TIGHT only allows HOSTILE tracks.', out_of_range: 'That launcher can\'t reach it (too far or too high). Wait, or tap another chip.',
         radar_off: 'Turn RADAR on: missiles need it.', not_ready: 'That launcher is reloading. Tap another green chip.', no_rounds: 'That launcher is empty. Tap another chip.' }[p.reason];
       if (m) setHint(m);
     });

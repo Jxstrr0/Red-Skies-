@@ -823,6 +823,8 @@
       if (!g.e.dead && (sureHit || rand() < g.pk)) kill(g.e, WP.HARROW, g.trackId, g.key);
       else if (!(sureHit && g.e.killed)) miss(null, g.trackId);
     }
+    // training: a salvo's spare round vanishes with the kill (the same step), not a step later (the tutorial may freeze the sim then)
+    if (sureHit) for (let i = s.missiles.length - 1; i >= 0; i--) { const m = s.missiles[i], P = mpriv[m.id]; if (P && P.ent.dead && P.ent.killed) { s.missiles.splice(i, 1); delete mpriv[m.id]; } }
     const G1 = launcher('G1');
     if (s.gun.firing && s.t >= gunUntil) { s.gun.firing = false; s.gun.targetId = null; if (G1.reloadT <= 0) G1.ready = true; }
     // V1.4.3: an empty launcher reloads as soon as free reserve exists (a reload refused because another launcher had the last
