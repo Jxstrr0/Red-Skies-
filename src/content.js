@@ -25,6 +25,7 @@
      comms:[ { t:s, from:'HQ'|'CAP'|'TOWER'|'BATTERY', text, priority:'low'|'normal'|'high', needsAck?:true } ],
      weather?:{ time:'dawn'|'day'|'dusk'|'night', sky:'clear'|'overcast'|'rain' }   [v1.1] default {dusk, clear}
      endless?:true, seed?:number   [v1.1] survival: sim pulls waves from makeSurvivalWave(n, seed); duration ignored
+     sureHit?:true                 [V1.4.4] training aid: every battery shot kills, targets never evade (see contracts.js)
    }
    [v1.1] makeFreeShift(seed, difficulty, opts?) — opts.weather {time?, sky?} ('random'/missing → picked from the seed).
    makeSurvivalShift(seed) → endless ShiftDef.  makeSurvivalWave(n, seed) → { spawns (t relative to wave start), comms }.

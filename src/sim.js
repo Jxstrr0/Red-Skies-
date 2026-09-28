@@ -70,6 +70,9 @@
   const PK_MARGIN = 0.12;        // bestLauncher: a costlier weapon must beat a cheaper one's Pk by this much (saves Lances for what needs them)
 
   let content = null, def = null, baseSeed = null, rand = Math.random;
+  // V1.4.4 training aid (ShiftDef.sureHit): every battery shot kills and targets never evade. Every guard tests this flag
+  // BEFORE any rand() in the same expression, so a shift without the flag draws exactly the same random numbers as before.
+  let sureHit = false;
   let spawnList = [], commsList = [], roeList = [], evList = [], ents = [], trackEnt = {}, mpriv = {};
   let spawnIdx = 0, commsIdx = 0, roeIdx = 0, evIdx = 0, nextEnt = 1, nextTrack = 1, nextMissile = 1, nextComms = 1, warnNext = WARN_AFTER;
   let pendLaunch = [], pendIff = [], pendGun = [], debris = [], alarms = {}, lockOn = {}, activeEv = {};
@@ -193,6 +196,12 @@
     return e;
   }
 
+  // a missile or a gun burst of ours is on its way to e (training: sure-hit targets wait for it)
+  function engaged(e) {
+    for (const k in mpriv) if (mpriv[k].ent === e) return true;
+    return pendGun.some(g => g.e === e) || pendLaunch.some(p => p.e === e);
+  }
+
   function removeEnt(e, reason) {
     const i = ents.indexOf(e);
     if (i >= 0) ents.splice(i, 1);
@@ -215,7 +224,7 @@
   }
   function evade(e, m) {
     const s = sim.state, jet = e.kind === K.JET_HOSTILE;
-    if ((!jet && e.kind !== K.HELO_HOSTILE) || e.dead || s.t < e.evNext) return;
+    if (sureHit || (!jet && e.kind !== K.HELO_HOSTILE) || e.dead || s.t < e.evNext) return;   // training: targets never evade
     const th = content.threats[e.kind] || {}, man = typeof th.maneuver === 'number' ? th.maneuver : 0.5;
     if (rand() >= (m ? 0.25 + 0.5 * man : 0.3 * man)) return;               // jet (.6): 55 % vs a missile, 18 % vs a lock
     e.evNext = s.t + EV_GAP; e.evaded = true;
@@ -316,6 +325,7 @@
       emit('LEAKER', { id: e.trackId || e.id });
       hist('LEAKER', e.trackId || e.id, e.x, e.y);
     }
+    if (sureHit && engaged(e)) return null;                        // training: a target with a round on the way stays until it is hit
     if ((e.kind === K.CRUISE || e.kind === K.DRONE) && r < 0.5) { assetHit(e, e.kind === K.CRUISE ? 0.25 : 0.08); return 'exited'; }
     if (r > EXIT_KM || ((e.egress || e.leaked) && r > (e.egressKm || EGRESS_KM))) return 'exited';
     return null;
@@ -515,6 +525,7 @@
   }
 
   function kill(e, weapon, targetId, key) {
+    e.killed = true;
     const s = sim.state, friend = !HOSTILE[e.kind], trackId = e.trackId || null, tid = trackId || targetId || e.id;
     if (!friend) { s.stats.kills++; if (key && key === e.firstShot) s.stats.firstShotKills++; }
     emit('KILL', { targetId: tid, weapon, wasFriend: friend, x: e.x, y: e.y, alt: e.alt, trackId });
@@ -563,7 +574,7 @@
       const m = s.missiles[i], P = mpriv[m.id], e = P.ent, w = weap(m.weapon);
       const done = () => { s.missiles.splice(i, 1); delete mpriv[m.id]; };
       m.flightT += dt;
-      if (e.dead) { done(); miss(m.id, m.targetId); continue; }
+      if (e.dead) { done(); if (!(sureHit && e.killed)) miss(m.id, m.targetId); continue; }   // training: a salvo's spare round just disappears
       const d0 = Math.hypot((e.x - m.x) * 1000, (e.y - m.y) * 1000, e.alt - m.alt);
       const K = KIN[m.weapon] || { ign: 0, acc: 1e9, burn: 1e9, k: 0, pitch: 0, tmax: 1e9 }, te = m.flightT - K.ign;
       if (te <= 0) P.v = 0;
@@ -631,8 +642,12 @@
         const u = P.u || [0, 0, 0], vc = v - (Math.sin(e.hdg * D2R) * u[0] + Math.cos(e.hdg * D2R) * u[1]) * e.spd;   // closing speed
         const q = v / (K.acc * K.burn), agile = e.ev && e.ev.hdg !== null ? clamp01((q * q - AGILE[0]) / AGILE[1]) : 1;   // g available ∝ v²
         const pk = P.pk * (P.degraded ? 0.25 : 1) * clamp01((vc - 300) / 600) * agile * (e.ev && e.ev.alt !== null && e.alt < 400 ? DIVE_PK : 1);
-        if (rand() < pk) kill(e, m.weapon, m.targetId, m.id); else miss(m.id, m.targetId);
-      } else if (m.flightT > K.tmax || (P.bo && v < Math.max(MIN_V, e.spd * 1.3))) { done(); miss(m.id, m.targetId); }   // out of energy / guidance time
+        if (sureHit || rand() < pk) kill(e, m.weapon, m.targetId, m.id); else miss(m.id, m.targetId);
+      } else if (m.flightT > K.tmax || (P.bo && v < Math.max(MIN_V, e.spd * 1.3))) {             // out of energy / guidance time
+        done();
+        if (sureHit) { emit('INTERCEPT', { missileId: m.id, targetId: m.targetId, x: e.x, y: e.y, alt: e.alt }); kill(e, m.weapon, m.targetId, m.id); }   // training safety net
+        else miss(m.id, m.targetId);
+      }
     }
   }
 
@@ -693,7 +708,7 @@
   sim.init = function (opts) {
     content = (opts && opts.content) || RS.content;
     baseSeed = opts && typeof opts.seed === 'number' ? opts.seed >>> 0 : null;
-    def = null;
+    def = null; sureHit = false;
     sim.state = freshState();
   };
 
@@ -708,7 +723,7 @@
   }
   sim.startShift = function (shiftDef) {
     if (!content) sim.init({ content: RS.content });
-    def = shiftDef; resetPrivate();
+    def = shiftDef; resetPrivate(); sureHit = !!def.sureHit;
     let h = 2166136261; for (const c of String(def.id)) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
     if (baseSeed !== null) h ^= Math.imul(baseSeed + 1, 0x9E3779B1);
     rand = mulberry32(h >>> 0); for (let i = 0; i < 8; i++) rand();
@@ -805,7 +820,8 @@
       const g = pendGun[i];
       if (s.t < g.at) continue;
       pendGun.splice(i, 1);
-      if (!g.e.dead && rand() < g.pk) kill(g.e, WP.HARROW, g.trackId, g.key); else miss(null, g.trackId);
+      if (!g.e.dead && (sureHit || rand() < g.pk)) kill(g.e, WP.HARROW, g.trackId, g.key);
+      else if (!(sureHit && g.e.killed)) miss(null, g.trackId);
     }
     const G1 = launcher('G1');
     if (s.gun.firing && s.t >= gunUntil) { s.gun.firing = false; s.gun.targetId = null; if (G1.reloadT <= 0) G1.ready = true; }

@@ -192,6 +192,9 @@ RS.AIR_VISIBLE_KM = 15;   // aircraft (not missiles) are put in state.visible ou
    RS.content.threats[kind] + { pkMod:{lance,dart,harrow} (multiplier), maneuver:0..1, armCapable:boolean, jammer:boolean }
    RS.content.reserve = { lance, dart, harrow }   starting magazine for a shift unless ShiftDef.reserve overrides
    ShiftDef + { reserve?, roeChanges?:[{t, roe}], events?:[{t, kind:RS.RANDOM_EVENT.*, duration, detail}] }
+   ShiftDef + sureHit?:true   V1.4.4 training aid (the Training Watch sets it): every battery shot (Lance, Dart, Harrow) kills its
+       target, targets never evade, a target with a round on the way cannot leave, and a salvo's spare round whose target was
+       already killed vanishes without a MISS. Without the flag the sim behaves (and draws random numbers) exactly as before.
    ShiftDef.spawns[i] + { iffBroken?:true, jammer?:true, armCarrier?:true (fires an ARM when our radar has emitted >90 s and
        it is within 45 km), strike?:true (hostile releases on the asset when inside 6 km → ASSET_HIT), group?:string,
        popup?:{hideAlt, atKm} (helo stays below hideAlt until within atKm, then climbs) , count?:n, spread?:km (swarm) }
