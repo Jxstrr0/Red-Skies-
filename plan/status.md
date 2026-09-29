@@ -5,7 +5,7 @@ Read this first in a new session; it replaces re-exploring the code. Update it a
 - **Version:** see `VERSION` (Major.Minor.Patch.Build; Major = overhaul, Minor = feature batch, Patch = tweak/fix, Build = republish). Bump before every publish.
 - **Repo:** https://github.com/Jxstrr0/Red-Skies- (`main` is the default branch)
 - **Live artifact:** https://claude.ai/artifact/2vVrrJw4wg99sdZw6rptYP. Publish `dist/weapons_hold.artifact.html` to this same URL, labelled with the version.
-  - Last publish: V1.4.3.0 (artifact version 37), 2026-09-27. The source files are published alongside the page.
+  - Last publish: V1.4.4.0 (artifact version 38), 2026-09-29. The source files are published alongside the page.
 - **Studio:** Prairie Blue Studio. The license is all rights reserved (`LICENSE`); three.js is MIT (`vendor/three.LICENSE`).
 
 ## Layout (details in README.md)
