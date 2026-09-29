@@ -29,9 +29,11 @@ function run(seed, o) {
   if (o.salvo) RS.sim.cmd.setDoctrine(RS.DOCTRINE.SALVO);
   const shotAt = new Set(), killedIds = new Set();
   RS.bus.on('KILL', p => { if (p.trackId) killedIds.add(p.trackId); if (p.targetId) killedIds.add(p.targetId); });
-  let radarBackAt = -1;
+  let radarBackAt = -1, lingering = 0;
   for (let i = 0; i < 20 * (o.maxS || 420); i++) {
+    const k0 = ev.KILL.length;
     RS.sim.step();
+    for (const k of ev.KILL.slice(k0)) if (S().missiles.some(m => m.targetId === (k.trackId || k.targetId))) lingering++;   // a spare round outliving its kill
     if (radarBackAt >= 0 && S().t >= radarBackAt) { RS.sim.cmd.radar(true); radarBackAt = -1; }
     if (i % 10 || S().t < (o.fireAt || 0)) continue;
     for (const t of S().tracks) {
@@ -47,7 +49,7 @@ function run(seed, o) {
     }
     if (S().t > 60 && !S().tracks.some(t => HOSTILE.includes(RS.sim.debugTruth(t.id))) && !S().missiles.length && shotAt.size >= (o.need || 1)) break;
   }
-  return { RS, ev, shotAt, killedIds, missedTargets: [...shotAt].filter(id => !killedIds.has(id)) };
+  return { RS, ev, shotAt, killedIds, lingering, missedTargets: [...shotAt].filter(id => !killedIds.has(id)) };
 }
 const lance = (RS, t) => (RS.sim.state.battery.launchers.find(l => l.weapon === 'lance' && RS.sim.query.engage(t.id, l.id).ok) || {}).id || null;
 const dart = (RS, t) => RS.sim.query.engage(t.id, 'L3').ok ? 'L3' : null;
@@ -64,14 +66,14 @@ console.log('Training Watch def');
 console.log('every training shot hits (Lance / Dart / gun / best, shot and salvo, 6 seeds each)');
 const PICKS = { best: null, lance, dart, gun };
 for (const [name, pick] of Object.entries(PICKS)) for (const salvo of [false, true]) {
-  let shots = 0, missed = 0, miss = 0, evade = 0, fired = 0;
+  let shots = 0, missed = 0, miss = 0, evade = 0, fired = 0, linger = 0;
   for (let seed = 1; seed <= 6; seed++) {
     const r = run(seed, { pick, salvo, fireAt: 10 + seed * 7, need: name === 'gun' ? 1 : 2 });
     shots += r.shotAt.size; missed += r.missedTargets.length; miss += r.ev.MISS.length; evade += r.ev.EVADE.length;
-    fired += r.ev.LAUNCH.length + r.ev.GUN_FIRE.length;
+    fired += r.ev.LAUNCH.length + r.ev.GUN_FIRE.length; linger += r.lingering;
   }
-  ok(shots > 0 && missed === 0 && miss === 0 && evade === 0,
-    `${name.padEnd(5)} ${salvo ? 'salvo' : 'shot '}: ${shots} targets, ${fired} rounds/bursts fired, ${missed} survived, ${miss} MISS events, ${evade} EVADE events`);
+  ok(shots > 0 && missed === 0 && miss === 0 && evade === 0 && linger === 0,
+    `${name.padEnd(5)} ${salvo ? 'salvo' : 'shot '}: ${shots} targets, ${fired} rounds/bursts fired, ${missed} survived, ${miss} MISS events, ${evade} EVADE events, ${linger} spare rounds outlived a kill`);
 }
 
 console.log('edge cases');
