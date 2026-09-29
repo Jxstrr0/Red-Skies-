@@ -53,6 +53,7 @@ Read this first in a new session; it replaces re-exploring the code. Update it a
     - The text drops "(top right)" and the "make it big" tip when the camera fills the view.
     - Watching steps show "watching…" instead of "your move". The out-of-range hint also covers "too high" (gun vs the 5000 m jet).
     - A salvo's spare round vanishes with the kill.
+    - The no-fit fallback weighs the ring target and the II button 100× more than the scope or the camera. On a 360×640 phone the radio-call card used to cover II.
 - **1.4.3.0**
   - Batch 1 (bug fixes):
     - SALVO second round re-checks ROE, FRIEND, assignment, radar and the fire-control solution.
