@@ -5,7 +5,7 @@ Read this first in a new session; it replaces re-exploring the code. Update it a
 - **Version:** see `VERSION` (Major.Minor.Patch.Build; Major = overhaul, Minor = feature batch, Patch = tweak/fix, Build = republish). Bump before every publish.
 - **Repo:** https://github.com/Jxstrr0/Red-Skies- (`main` is the default branch)
 - **Live artifact:** https://claude.ai/artifact/2vVrrJw4wg99sdZw6rptYP. Publish `dist/weapons_hold.artifact.html` to this same URL, labelled with the version.
-  - Last publish: V1.4.3.0 (artifact version 37), 2026-09-27. The source files are published alongside the page.
+  - Last publish: V1.4.4.0 (artifact version 38), 2026-09-29. The source files are published alongside the page.
 - **Studio:** Prairie Blue Studio. The license is all rights reserved (`LICENSE`); three.js is MIT (`vendor/three.LICENSE`).
 
 ## Layout (details in README.md)
@@ -53,6 +53,7 @@ Read this first in a new session; it replaces re-exploring the code. Update it a
     - The text drops "(top right)" and the "make it big" tip when the camera fills the view.
     - Watching steps show "watching…" instead of "your move". The out-of-range hint also covers "too high" (gun vs the 5000 m jet).
     - A salvo's spare round vanishes with the kill.
+    - The no-fit fallback weighs the ring target and the II button 100× more than the scope or the camera. On a 360×640 phone the radio-call card used to cover II.
 - **1.4.3.0**
   - Batch 1 (bug fixes):
     - SALVO second round re-checks ROE, FRIEND, assignment, radar and the fire-control solution.

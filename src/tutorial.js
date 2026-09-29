@@ -265,8 +265,8 @@
     const ls = ($('lstrip') || $('thumbzone') || app).getBoundingClientRect();
     const w = Math.min(ab.width - 16, 440), left = ab.left + (ab.width - w) / 2;
     card.style.width = w + 'px'; card.style.left = left + 'px';
-    const h = card.offsetHeight, floor = ls.top - 6, pad = 8, pb = $('m-pause'), avoid = tr ? [tr] : [];
-    if (pb && pb.offsetParent) { const b = pb.getBoundingClientRect(); avoid.push({ l: b.left, t: b.top, r: b.right, b: b.bottom }); }   // keep II reachable
+    const h = card.offsetHeight, floor = ls.top - 6, pad = 8, pb = $('m-pause'), avoid = tr ? [Object.assign({ k: 100 }, tr)] : [];   // k: weight in the no-fit fallback
+    if (pb && pb.offsetParent) { const b = pb.getBoundingClientRect(); avoid.push({ l: b.left, t: b.top, r: b.right, b: b.bottom, k: 100 }); }   // keep II reachable
     const ps = $('p-scope'); let psTop = hb.bottom;              // V1.4: the radar console is on the cabin's lower monitor: keep it clear
     if (ps && ps.style.visibility !== 'hidden') { const b = ps.getBoundingClientRect(); if (b.height) { psTop = b.top; avoid.push({ l: b.left, t: b.top, r: b.right, b: b.bottom }); } }
     if (eye) { const e = $('eo-fr'), b = e && e.getBoundingClientRect(); if (b && b.width && b.height) avoid.push({ l: b.left, t: b.top, r: b.right, b: b.bottom }); }   // V1.4.4: camera steps keep the camera visible
@@ -274,7 +274,8 @@
     const cands = [psTop - h - 6, Math.max(8, hb.top + 54), floor - h];
     let top = cands.find(t => t >= 0 && t + h <= floor && !hits(t));
     if (top === undefined) {                                     // fits nowhere (small phone): the slot that covers the least
-      const cover = t => avoid.reduce((a, q) => a + Math.max(0, Math.min(t + h, q.b + pad) - Math.max(t, q.t - pad)) * Math.max(0, Math.min(left + w, q.r + pad) - Math.max(left, q.l - pad)), 0);
+      // the ring target and II weigh 100×: covering part of the scope or the camera beats hiding the control to use or the pause button
+      const cover = t => avoid.reduce((a, q) => a + (q.k || 1) * Math.max(0, Math.min(t + h, q.b + pad) - Math.max(t, q.t - pad)) * Math.max(0, Math.min(left + w, q.r + pad) - Math.max(left, q.l - pad)), 0);
       top = cands.map(t => Math.max(0, Math.min(t, floor - h))).reduce((a, t) => cover(t) < cover(a) ? t : a);
     }
     card.style.top = Math.round(top) + 'px';
